@@ -1,0 +1,4 @@
+{
+  "match": "https?://(i\\.)?imgur\\.com/(a/)?[A-Za-z0-9]+",
+  "processor": "./processors/imgur.js"
+}

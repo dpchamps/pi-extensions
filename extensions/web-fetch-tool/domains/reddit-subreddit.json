@@ -1,0 +1,7 @@
+{
+  "match": "https?://(old\\.|www\\.)?reddit\\.com/r/[^/]+/?$",
+  "fetch": {
+    "urlTransform": "{url}.json"
+  },
+  "processor": "./processors/reddit.js"
+}

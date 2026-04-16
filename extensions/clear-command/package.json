@@ -1,0 +1,8 @@
+{
+  "name": "@dpchamps/pi-clear-command",
+  "version": "0.1.0",
+  "description": "pi extension: /clear command — clear context, preserve session",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module"
+}
