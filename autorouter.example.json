@@ -1,13 +1,15 @@
 {
-  "stickyTurns": 3,
+  "stickyTurns": 0,
   "classifier": {
     "provider": "ollama",
     "model": "gemma4-31b",
     "fallback": "normal",
+    "guidance": "\n\nThink about what the user is asking:\n- Is it a quick, single-action task (run test, format, lint, check status, simple read)? → TRIVIAL\n- Does it need analysis, debugging, multi-step work, or code changes? → NORMAL\n- Is it architecturally complex or requires deep investigation? → COMPLEX",
     "categories": {
-      "trivial": "Simple question, formatting, lookup, one-liner. No file changes needed.",
-      "normal": "Fallback for all non-trivial non-complex tasks.",
-      "complex": "Debug complex issues, architecture/design, multi-step analysis, large refactors."
+      "trivial": "Quick single-action tasks: run test/build/lint, format, check status, simple lookups, simple and contained code authoring. No analysis needed.",
+      "normal": "Standard development tasks with some work: features, fixes, refactors, documentation, debugging.",
+      "complex": "Complex work: architecture decisions, deep debugging, multi-file refactors, design docs.",
+      "documentation": "For tasks that are strictly about writing documentation."
     }
   },
   "routes": {
@@ -24,6 +26,11 @@
       "provider": "openrouter",
       "model": "z-ai/glm-5.1",
       "thinking": "high"
+    },
+    "documentation": {
+      "provider": "openrouter",
+      "model": "qwen/qwen3.6-plus",
+      "thinking": "medium"
     }
   },
   "defaultModel": {

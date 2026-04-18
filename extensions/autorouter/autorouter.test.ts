@@ -1,6 +1,70 @@
 import { describe, it, expect } from "vitest";
 
 describe("autorouter", () => {
+  // ── buildClassifierContext ────────────────────────────────────────────────
+
+  describe("buildClassifierContext", () => {
+    function buildClassifierContext(userPrompt: string, branch: any[]): { prompt: string; history: string } {
+      const recentLines: string[] = [];
+      let lastAssistant = "";
+
+      for (const entry of branch.slice(-6)) {
+        if (entry.type === "message") {
+          const text = entry.message?.content
+            ?.filter((c: any) => c.type === "text")
+            .map((c: any) => c.text)
+            .join("\n") ?? "";
+
+          if (entry.message?.role === "assistant") {
+            lastAssistant = text;
+          } else if (entry.message?.role === "user" && lastAssistant) {
+            const snippet = lastAssistant.slice(0, 200).replace(/\n/g, " ");
+            recentLines.unshift(`User asked: "${snippet}"...`);
+            lastAssistant = "";
+            if (recentLines.length >= 2) break;
+          }
+        }
+      }
+
+      const history = recentLines.length
+        ? `\n\nRecent context:\n${recentLines.join("\n")}`
+        : "";
+
+      return { prompt: userPrompt, history };
+    }
+
+    it("includes prior assistant response when user says yes", () => {
+      const branch = [
+        { type: "message", message: { role: "user", content: [{ type: "text", text: "refactor the auth module" }] } },
+        { type: "message", message: { role: "assistant", content: [{ type: "text", text: "I'll do a complex refactor of the auth system with multiple files" }] } },
+        { type: "message", message: { role: "user", content: [{ type: "text", text: "yes" }] } },
+      ];
+      const ctx = buildClassifierContext("yes", branch);
+      expect(ctx.history).toContain("User asked:");
+      expect(ctx.history).toContain("refactor");
+    });
+
+    it("returns empty history for fresh session", () => {
+      const ctx = buildClassifierContext("help with tests", []);
+      expect(ctx.history).toBe("");
+    });
+
+    it("limits to last 2 exchanges", () => {
+      const branch = [
+        { type: "message", message: { role: "user", content: [{ type: "text", text: "first" }] } },
+        { type: "message", message: { role: "assistant", content: [{ type: "text", text: "first response" }] } },
+        { type: "message", message: { role: "user", content: [{ type: "text", text: "second" }] } },
+        { type: "message", message: { role: "assistant", content: [{ type: "text", text: "second response" }] } },
+        { type: "message", message: { role: "user", content: [{ type: "text", text: "third" }] } },
+        { type: "message", message: { role: "assistant", content: [{ type: "text", text: "third response" }] } },
+        { type: "message", message: { role: "user", content: [{ type: "text", text: "current" }] } },
+      ];
+      const ctx = buildClassifierContext("current", branch);
+      // Should have 2 most recent exchanges
+      expect(ctx.history.split("User asked:").length - 1).toBe(2);
+    });
+  });
+
   // ── buildClassifierPrompt ──────────────────────────────────────────────────
 
   describe("buildClassifierPrompt", () => {

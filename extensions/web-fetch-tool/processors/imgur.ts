@@ -14,10 +14,75 @@ const API_BASE = "https://api.imgur.com/3";
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+interface ImgurUrlInfo {
+  type: "direct" | "album" | "image";
+  id: string;
+}
+
+interface ImgurImage {
+  id: string;
+  link: string;
+  type: string | null;
+  width: number;
+  height: number;
+  size: number;
+  title: string | undefined;
+  description: string | undefined;
+}
+
+interface ImgurAlbumData {
+  id: string;
+  title?: string;
+  description?: string;
+  images_count?: number;
+  images: ImgurApiImage[];
+}
+
+interface ImgurApiImage {
+  id: string;
+  link: string;
+  type: string | null;
+  width: number;
+  height: number;
+  size: number;
+  title?: string;
+  description?: string;
+}
+
+interface ImgurApiResponse {
+  data: ImgurAlbumData | ImgurApiImage;
+  success: boolean;
+  status: number;
+}
+
+interface ImgurResult {
+  type: "album" | "image" | "direct";
+  id?: string;
+  title?: string;
+  description?: string;
+  image_count?: number;
+  images: Array<{
+    id: string;
+    link: string;
+    type?: string | null;
+    width?: number;
+    height?: number;
+    size?: number;
+    title?: string | undefined;
+    description?: string | undefined;
+  }>;
+}
+
+interface ImgurError {
+  error: string;
+  url: string;
+  status?: number;
+}
+
 /**
  * Parse an Imgur URL and return its type and ID.
  */
-function parseImgurUrl(url) {
+function parseImgurUrl(url: string): ImgurUrlInfo | null {
   // Direct image link: i.imgur.com/{imageId}.{ext}
   const directMatch = url.match(/i\.imgur\.com\/([A-Za-z0-9]+)(?:\.[a-z]+)?/);
   if (directMatch) {
@@ -42,7 +107,7 @@ function parseImgurUrl(url) {
 /**
  * Extract essential fields from an Imgur image object.
  */
-function extractImage(img) {
+function extractImage(img: ImgurApiImage): ImgurImage {
   return {
     id: img.id,
     link: img.link,
@@ -55,15 +120,44 @@ function extractImage(img) {
   };
 }
 
+export function shapeResponse(json: ImgurApiResponse): ImgurResult | ImgurError {
+  const data = json.data;
+
+  // Album
+  if ("images" in data && Array.isArray(data.images)) {
+    return {
+      type: "album",
+      id: data.id,
+      title: data.title || undefined,
+      description: data.description || undefined,
+      image_count: data.images_count || data.images.length,
+      images: data.images.map(extractImage),
+    };
+  }
+
+  // Single image
+  return {
+    type: "image",
+    id: data.id,
+    title: data.title || undefined,
+    description: data.description || undefined,
+    images: [extractImage(data as ImgurApiImage)],
+  };
+}
+
 /**
  * Main processor entry point.
  * When no `fetch` config is present in the domain config, the pipeline
  * passes the original URL instead of parsed JSON.
  */
-export default async function processImgur(input, originalUrl) {
+export default async function processImgur(
+  input: unknown,
+  originalUrl: string
+): Promise<ImgurResult | ImgurError> {
   // If input is already parsed JSON (shouldn't happen for Imgur, but safety check)
   if (typeof input === "object" && input !== null && !Array.isArray(input)) {
-    if (input.data) return shapeResponse(input);
+    const obj = input as Record<string, unknown>;
+    if (obj.data) return shapeResponse(input as ImgurApiResponse);
   }
 
   const parsed = parseImgurUrl(originalUrl);
@@ -105,7 +199,7 @@ export default async function processImgur(input, originalUrl) {
     };
   }
 
-  const json = await response.json();
+  const json: ImgurApiResponse = await response.json();
 
   if (!json.success) {
     return {
@@ -118,7 +212,7 @@ export default async function processImgur(input, originalUrl) {
   const data = json.data;
 
   // Album
-  if (parsed.type === "album" && data.images) {
+  if (parsed.type === "album" && "images" in data && data.images) {
     return {
       type: "album",
       id: data.id,
@@ -136,7 +230,7 @@ export default async function processImgur(input, originalUrl) {
       id: data.id,
       title: data.title || undefined,
       description: data.description || undefined,
-      images: [extractImage(data)],
+      images: [extractImage(data as ImgurApiImage)],
     };
   }
 

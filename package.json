@@ -22,7 +22,9 @@
   },
   "scripts": {
     "format": "prettier --write .",
-    "typecheck": "npx tsc --noEmit"
+    "typecheck": "npx tsc --noEmit",
+    "test": "vitest run",
+    "test:web-fetch": "cd extensions/web-fetch-tool && npx vitest run"
   },
   "devDependencies": {
     "@mariozechner/pi-ai": "^0.67.68",
