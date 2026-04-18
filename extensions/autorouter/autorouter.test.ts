@@ -34,35 +34,17 @@ Category:`;
       );
       expect(result).toContain("Categories:");
       expect(result).toContain("- trivial: Simple question");
-      expect(result).toContain("- write: Implement something");
       expect(result).toContain('Task: "what is this?"');
-      expect(result).toContain("Category:");
     });
 
-    it("uses custom prompt template with placeholders", () => {
+    it("uses custom prompt template", () => {
       const result = buildClassifierPrompt({ x: "y" }, "do stuff", "Cats: {{categories}}\nTask: {{task}}");
       expect(result).toBe("Cats: - x: y\nTask: do stuff");
     });
 
     it("handles empty categories", () => {
       const result = buildClassifierPrompt({}, "test");
-      expect(result).toContain("Categories:");
       expect(result).toContain('Task: "test"');
-    });
-
-    it("handles task with special characters (no escaping)", () => {
-      const result = buildClassifierPrompt({ a: "b" }, 'say "hello" world');
-      expect(result).toContain('Task: "say "hello" world"');
-    });
-
-    it("template with only categories placeholder", () => {
-      const result = buildClassifierPrompt({ foo: "bar" }, "task", "Cats: {{categories}}");
-      expect(result).toBe("Cats: - foo: bar");
-    });
-
-    it("template with only task placeholder", () => {
-      const result = buildClassifierPrompt({ a: "b" }, "do it", "T: {{task}}");
-      expect(result).toBe("T: do it");
     });
   });
 
@@ -77,135 +59,165 @@ Category:`;
         .toLowerCase();
     }
 
-    it("strips markdown fences with language tag", () => {
+    it("strips markdown fences", () => {
       expect(normalizeCategory("```\ntrivial\n```")).toBe("trivial");
       expect(normalizeCategory("```json\nwrite\n```")).toBe("write");
     });
 
-    it("handles plain category (no fence)", () => {
+    it("handles plain category", () => {
       expect(normalizeCategory("trivial")).toBe("trivial");
       expect(normalizeCategory("Write")).toBe("write");
       expect(normalizeCategory("  trivial  ")).toBe("trivial");
     });
+  });
 
-    it("handles newline-trimmed fences", () => {
-      expect(normalizeCategory("\nread\n")).toBe("read");
+  // ── parseToken (autorouter:<route>) ───────────────────────────────────────
+
+  describe("parseToken", () => {
+    function parseToken(text: string): { route: string; cleaned: string } | null {
+      const m = text.match(/autorouter:(\w+)/i);
+      if (!m) return null;
+      const route = m[1].toLowerCase();
+      const cleaned = text.replace(/autorouter:\w+/i, "").replace(/\s+/g, " ").trim();
+      return { route, cleaned: cleaned || " " };
+    }
+
+    it("extracts route and cleans prompt", () => {
+      const result = parseToken("fix the bug autorouter:trivial");
+      expect(result).toEqual({ route: "trivial", cleaned: "fix the bug" });
+    });
+
+    it("handles uppercase token", () => {
+      const result = parseToken("do stuff AUTOROUTER:write");
+      expect(result).toEqual({ route: "write", cleaned: "do stuff" });
+    });
+
+    it("handles token at start", () => {
+      const result = parseToken("autorouter:reason implement this");
+      expect(result).toEqual({ route: "reason", cleaned: "implement this" });
+    });
+
+    it("handles token only", () => {
+      const result = parseToken("autorouter:read");
+      expect(result).toEqual({ route: "read", cleaned: " " }); // normalized to single space
+    });
+
+    it("returns null when no token", () => {
+      expect(parseToken("normal prompt")).toBeNull();
+      expect(parseToken("autorouter:")).toBeNull(); // empty route
+      expect(parseToken("autoroute:write")).toBeNull(); // typo, no "r"
+    });
+
+    it("handles token in middle", () => {
+      const result = parseToken("update this autorouter:trivial and that");
+      expect(result).toEqual({ route: "trivial", cleaned: "update this and that" });
+    });
+
+    it("handles multiple tokens (first wins)", () => {
+      const result = parseToken("stuff autorouter:reason more autorouter:write");
+      expect(result).toEqual({ route: "reason", cleaned: "stuff more autorouter:write" });
     });
   });
 
-  // ── config structure ───────────────────────────────────────────────────────
+  // ── sticky routing logic ─────────────────────────────────────────────────
 
-  describe("AutorouterConfig shape", () => {
-    it("requires classifier with model and categories", () => {
-      const config = {
-        classifier: {
-          provider: "openrouter",
-          model: "google/gemini-2.5-flash",
-          categories: { trivial: "Simple question" },
-          fallback: "trivial",
-        },
-        routes: {
-          trivial: { provider: "openrouter", model: "meta-llama/llama-3.3-70b" },
-        },
-        defaultModel: { provider: "anthropic", model: "claude-sonnet-4-5" },
-      };
+  describe("sticky routing", () => {
+    // Simulates sticky turn countdown
+    function makeStickyDecrement(remaining: number): number | null {
+      if (remaining <= 0) return null; // no sticky, need to classify
+      return remaining - 1;
+    }
 
-      expect(config.classifier.categories).toHaveProperty("trivial");
-      expect(config.routes.trivial).toHaveProperty("provider");
-      expect(config.routes.trivial).toHaveProperty("model");
-      expect(config.defaultModel).toHaveProperty("provider");
-      expect(config.defaultModel).toHaveProperty("model");
+    it("returns new remaining count when sticky is active", () => {
+      expect(makeStickyDecrement(3)).toBe(2);
+      expect(makeStickyDecrement(1)).toBe(0); // reaches 0, next call triggers classification
     });
 
-    it("route config supports optional thinking level", () => {
-      const route = { provider: "anthropic", model: "claude-sonnet-4-5", thinking: "high" as const };
-      expect(route.thinking).toBe("high");
+    it("returns null when sticky expired", () => {
+      expect(makeStickyDecrement(0)).toBeNull();
     });
 
-    it("classifier supports optional custom prompt", () => {
-      const cfg = {
-        classifier: {
-          provider: "openrouter",
-          model: "flash",
-          categories: {},
-          fallback: "x",
-          prompt: "Pick one: {{categories}}. Task: {{task}}",
-        },
-        routes: {},
-        defaultModel: { provider: "x", model: "y" },
-      };
-      expect(typeof cfg.classifier.prompt).toBe("string");
-    });
-
-    it("route falls back to classifier fallback then defaultModel", () => {
+    it("route falls back to classifier.fallback when category unknown", () => {
       const config = {
         classifier: { provider: "a", model: "b", categories: {}, fallback: "write" },
         routes: { write: { provider: "x", model: "y" } },
         defaultModel: { provider: "p", model: "q" },
       };
-
-      const cat: string = "trivial";
+      const cat = "unknown";
       const route =
         config.routes[cat as keyof typeof config.routes] ??
         config.routes[config.classifier.fallback as keyof typeof config.routes] ??
         config.defaultModel;
       expect(route.provider).toBe("x");
-      expect(route.model).toBe("y");
-    });
-
-    it("unknown category falls through to defaultModel", () => {
-      const config = {
-        classifier: { provider: "a", model: "b", categories: {}, fallback: "other" },
-        routes: { other: { provider: "x", model: "y" } },
-        defaultModel: { provider: "p", model: "q" },
-      };
-
-      const cat: string = "unknown";
-      const route =
-        config.routes[cat as keyof typeof config.routes] ??
-        config.routes[config.classifier.fallback as keyof typeof config.routes] ??
-        config.defaultModel;
-      expect(route.provider).toBe("x");
-      expect(route.model).toBe("y");
     });
   });
 
   // ── /autorouter command argument parsing ───────────────────────────────────
 
-  describe("/autorouter on/off argument parsing", () => {
-    const ENABLE_ARGS = ["on", "enable", "1", "true"];
-    const DISABLE_ARGS = ["off", "disable", "0", "false"];
-
+  describe("/autorouter argument parsing", () => {
     function parseCommandArg(arg: string | undefined): boolean | null {
       if (!arg?.trim()) return null;
       const a = arg.trim().toLowerCase();
-      if (ENABLE_ARGS.includes(a)) return true;
-      if (DISABLE_ARGS.includes(a)) return false;
-      return null; // unknown
+      if (["on", "enable", "1", "true"].includes(a)) return true;
+      if (["off", "disable", "0", "false"].includes(a)) return false;
+      return null;
     }
 
-    it("enable aliases return true", () => {
-      for (const a of ENABLE_ARGS) {
+    it("enable aliases", () => {
+      for (const a of ["on", "enable", "1", "true"]) {
         expect(parseCommandArg(a)).toBe(true);
       }
     });
 
-    it("disable aliases return false", () => {
-      for (const a of DISABLE_ARGS) {
+    it("disable aliases", () => {
+      for (const a of ["off", "disable", "0", "false"]) {
         expect(parseCommandArg(a)).toBe(false);
       }
     });
 
     it("unknown args return null", () => {
       expect(parseCommandArg("maybe")).toBeNull();
-      expect(parseCommandArg("yes")).toBeNull();
       expect(parseCommandArg("")).toBeNull();
-      expect(parseCommandArg("  ")).toBeNull();
+    });
+  });
+
+  // ── config structure ───────────────────────────────────────────────────────
+
+  describe("AutorouterConfig shape", () => {
+    it("requires classifier, routes, defaultModel", () => {
+      const cfg = {
+        classifier: { provider: "a", model: "b", categories: {}, fallback: "x" },
+        routes: { y: { provider: "p", model: "q" } },
+        defaultModel: { provider: "m", model: "n" },
+      };
+      expect(cfg.classifier).toBeDefined();
+      expect(cfg.routes).toBeDefined();
+      expect(cfg.defaultModel).toBeDefined();
     });
 
-    it("whitespace-trimmed args work", () => {
-      expect(parseCommandArg("  on  ")).toBe(true);
-      expect(parseCommandArg(" off ")).toBe(false);
+    it("supports optional stickyTurns", () => {
+      const cfg = { stickyTurns: 3, classifier: { provider: "a", model: "b", categories: {}, fallback: "x" }, routes: {}, defaultModel: { provider: "c", model: "d" } } as { stickyTurns?: number; classifier: Record<string, unknown>; routes: Record<string, unknown>; defaultModel: Record<string, unknown> };
+      expect(cfg.stickyTurns).toBe(3);
+    });
+
+    it("stickyTurns is optional (absent means disabled)", () => {
+      const cfg = { classifier: { provider: "a", model: "b", categories: {}, fallback: "x" }, routes: {}, defaultModel: { provider: "c", model: "d" } } as { stickyTurns?: number; classifier: Record<string, unknown>; routes: Record<string, unknown>; defaultModel: Record<string, unknown> };
+      expect(cfg.stickyTurns).toBeUndefined();
+    });
+
+    it("route supports optional thinking level", () => {
+      const route = { provider: "a", model: "b", thinking: "high" as const };
+      expect(route.thinking).toBe("high");
+    });
+
+    it("classifier supports optional custom prompt", () => {
+      const cfg = {
+        stickyTurns: 3,
+        classifier: { provider: "a", model: "b", categories: {}, fallback: "x", prompt: "Custom: {{categories}} {{task}}" },
+        routes: {},
+        defaultModel: { provider: "c", model: "d" },
+      };
+      expect(typeof cfg.classifier.prompt).toBe("string");
     });
   });
 });

@@ -1,8 +1,9 @@
 {
+  "stickyTurns": 3,
   "classifier": {
-    "provider": "openrouter",
-    "model": "google/gemini-2.5-flash",
-    "fallback": "write",
+    "provider": "ollama",
+    "model": "gemma4-31b",
+    "fallback": "normal",
     "categories": {
       "trivial": "Simple question, formatting, lookup, one-liner. No file changes needed.",
       "normal": "Fallback for all non-trivial non-complex tasks.",
@@ -26,7 +27,8 @@
     }
   },
   "defaultModel": {
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-20250514"
+    "provider": "openrouter",
+    "model": "minimax/minimax-m2.7",
+    "thinking": "medium"
   }
 }

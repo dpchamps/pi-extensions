@@ -9,6 +9,13 @@
  *   - <cwd>/.pi/autorouter.json   (project-local)
  *
  * Toggle on/off: /autorouter
+ *
+ * Sticky turns: stays on the classified model for N subsequent prompts
+ * before reclassifying. Config: { "stickyTurns": 3 } in autorouter.json.
+ *
+ * Token override: "autorouter:<route>" anywhere in the prompt forces that
+ * route immediately (no classifier call). The token is stripped before
+ * the prompt reaches the model.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -26,14 +33,13 @@ interface RouteConfig {
 }
 
 interface AutorouterConfig {
+  /** Number of user prompts to stay on the classified route before reclassifying. 0 = disabled. */
+  stickyTurns?: number;
   classifier: {
     provider: string;
     model: string;
-    /** Categories map. Keys are route identifiers, values are human-facing descriptions. */
     categories: Record<string, string>;
-    /** When classifier output doesn't match a known category or fails entirely. */
     fallback: string;
-    /** Optional custom prompt template. Use {{categories}} and {{task}} as placeholders. */
     prompt?: string;
   };
   routes: Record<string, RouteConfig>;
@@ -128,7 +134,6 @@ async function classify(config: AutorouterConfig, userPrompt: string): Promise<s
     const data = await res.json();
     let category = data.choices?.[0]?.message?.content?.trim()?.toLowerCase() ?? "";
 
-    // Strip markdown fences
     category = category.replace(/^```[\w-]*\n?/, "").replace(/\n?```$/, "").trim();
 
     if (category in config.routes) return category;
@@ -137,8 +142,20 @@ async function classify(config: AutorouterConfig, userPrompt: string): Promise<s
     return classifier.fallback;
   } catch (err) {
     console.error(`[autorouter] Classifier failed: ${err}`);
-    return classifier.fallback;
+    return config.classifier.fallback;
   }
+}
+
+// ── Token Override Parser ──────────────────────────────────────────────────
+
+// Matches "autorouter:<route>" (case-insensitive) anywhere in the prompt.
+// e.g. "fix the bug autorouter:trivial" → route = "trivial", cleaned = "fix the bug"
+function parseToken(text: string): { route: string; cleaned: string } | null {
+  const m = text.match(/autorouter:(\w+)/i);
+  if (!m) return null;
+  const route = m[1].toLowerCase();
+  const cleaned = text.replace(/autorouter:\w+/i, "").replace(/\s+/g, " ").trim();
+  return { route, cleaned: cleaned || " " }; // ensure non-empty
 }
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -148,6 +165,12 @@ let enabled = true;
 let savedModel: Model<Api> | undefined;
 let savedThinking: ReturnType<ExtensionAPI["getThinkingLevel"]> | undefined;
 let activeRoute: string | null = null;
+
+// Sticky routing state
+let stickyRoute: string | null = null; // the route key to reuse
+let stickyModel: Model<Api> | undefined; // the model to keep
+let stickyThinking: ReturnType<ExtensionAPI["getThinkingLevel"]> | undefined;
+let stickyRemaining = 0; // remaining sticky turns; 0 = classify next time
 
 // ── Extension ───────────────────────────────────────────────────────────────
 
@@ -174,6 +197,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify("Autorouter enabled", "info");
         } else if (["off", "disable", "0", "false"].includes(arg)) {
           enabled = false;
+          stickyRemaining = 0;
           ctx.ui.setStatus("autorouter", ctx.ui.theme.fg("accent", `⟳ autorouter (off)`));
           ctx.ui.notify("Autorouter disabled", "info");
         } else {
@@ -182,7 +206,6 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Show selector
       const choice = await ctx.ui.select("Autorouter", [
         `Currently: ${enabled ? "enabled" : "disabled"}`,
         "Enable",
@@ -190,6 +213,7 @@ export default function (pi: ExtensionAPI) {
       ]);
       if (!choice || choice === "status") return;
       enabled = choice === "Enable";
+      if (!enabled) stickyRemaining = 0;
       ctx.ui.setStatus("autorouter", ctx.ui.theme.fg("accent", enabled ? `⟳ autorouter` : `⟳ autorouter (off)`));
       ctx.ui.notify(`Autorouter ${enabled ? "enabled" : "disabled"}`, "info");
     },
@@ -199,6 +223,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     config = loadConfig(ctx.cwd);
     enabled = true;
+    stickyRemaining = 0;
+    stickyRoute = null;
+    stickyModel = undefined;
+    stickyThinking = undefined;
     if (config) {
       ctx.ui.setStatus("autorouter", ctx.ui.theme.fg("accent", `⟳ autorouter`));
     } else {
@@ -206,7 +234,29 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // ── Before agent turn: classify + switch model ───────────────────────────
+  // ── Input: strip autorouter: token before passing to agent ─────────────
+  pi.on("input", async (event, ctx) => {
+    if (!enabled || !config) return { action: "continue" };
+    if (event.source === "extension") return { action: "continue" };
+
+    const token = parseToken(event.text);
+    if (token) {
+      // Validate the route exists
+      if (!(token.route in config.routes) && !(token.route === config.classifier.fallback)) {
+        ctx.ui.notify(
+          `[autorouter] Unknown route "${token.route}". Using classifier.`,
+          "warning",
+        );
+        return { action: "continue" };
+      }
+      ctx.ui.notify(`[autorouter] Token override → ${token.route}`, "info");
+      return { action: "transform", text: token.cleaned };
+    }
+
+    return { action: "continue" };
+  });
+
+  // ── Before agent turn: route + switch model ────────────────────────────
   pi.on("before_agent_start", async (event, ctx) => {
     if (!enabled || !config) return;
 
@@ -214,35 +264,69 @@ export default function (pi: ExtensionAPI) {
     const prevThinking = pi.getThinkingLevel();
     activeRoute = null;
 
-    const category = await classify(config, event.prompt);
+    // Check for autorouter: token (already stripped in input, but store it here
+    // by checking the event prompt for "autorouter:" for safety)
+    const token = parseToken(event.prompt);
+    let routeKey: string | null = null;
+
+    if (token) {
+      routeKey = token.route;
+    } else if (stickyRemaining > 0 && stickyRoute && stickyModel) {
+      // Reuse sticky route — decrement counter
+      stickyRemaining--;
+      activeRoute = `🔒 ${stickyRoute} (${stickyRemaining} left)`;
+      await pi.setModel(stickyModel);
+      if (stickyThinking) pi.setThinkingLevel(stickyThinking);
+      return;
+    } else {
+      // Classify
+      routeKey = await classify(config, event.prompt);
+    }
+
     const route =
-      config.routes[category] ??
+      config.routes[routeKey!] ??
       config.routes[config.classifier.fallback] ??
       config.defaultModel;
 
     const model = ctx.modelRegistry.find(route.provider, route.model);
     if (!model) {
-      console.warn(`[autorouter] Model ${route.provider}/${route.model} not found in registry`);
+      console.warn(`[autorouter] Model ${route.provider}/${route.model} not found`);
       return;
     }
 
     await pi.setModel(model);
+
+    // Save state for restoration only on non-sticky (we keep sticky state separately)
     savedModel = prevModel;
     savedThinking = prevThinking;
-    activeRoute = `${category} → ${model.id}`;
+
+    // Set sticky state
+    const stickyTurns = config.stickyTurns ?? 0;
+    if (stickyTurns > 0) {
+      stickyRoute = routeKey!;
+      stickyModel = model;
+      stickyThinking = route.thinking
+        ? (route.thinking as ReturnType<ExtensionAPI["getThinkingLevel"]>)
+        : prevThinking;
+      stickyRemaining = stickyTurns;
+      activeRoute = `${routeKey} → ${model.id} (${stickyRemaining} sticky)`;
+    } else {
+      activeRoute = `${routeKey} → ${model.id}`;
+    }
 
     if (route.thinking) {
       pi.setThinkingLevel(route.thinking);
     }
   });
 
-  // ── After agent turn: restore previous model ────────────────────────────
+  // ── After agent turn: restore non-sticky model ─────────────────────────
   pi.on("agent_end", async () => {
-    if (savedModel) {
+    // Only restore if not in sticky mode
+    if (stickyRemaining === 0 && savedModel) {
       await pi.setModel(savedModel);
       savedModel = undefined;
     }
-    if (savedThinking !== undefined) {
+    if (stickyRemaining === 0 && savedThinking !== undefined) {
       pi.setThinkingLevel(savedThinking as any);
       savedThinking = undefined;
     }
