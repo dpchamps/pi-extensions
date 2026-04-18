@@ -1,0 +1,32 @@
+{
+  "classifier": {
+    "provider": "openrouter",
+    "model": "google/gemini-2.5-flash",
+    "fallback": "write",
+    "categories": {
+      "trivial": "Simple question, formatting, lookup, one-liner. No file changes needed.",
+      "normal": "Fallback for all non-trivial non-complex tasks.",
+      "complex": "Debug complex issues, architecture/design, multi-step analysis, large refactors."
+    }
+  },
+  "routes": {
+    "trivial": {
+      "provider": "ollama",
+      "model": "gemma4-31b"
+    },
+    "normal": {
+      "provider": "openrouter",
+      "model": "minimax/minimax-m2.7",
+      "thinking": "medium"
+    },
+    "complex": {
+      "provider": "openrouter",
+      "model": "z-ai/glm-5.1",
+      "thinking": "high"
+    }
+  },
+  "defaultModel": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-20250514"
+  }
+}

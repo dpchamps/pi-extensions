@@ -25,10 +25,12 @@
     "typecheck": "npx tsc --noEmit"
   },
   "devDependencies": {
+    "@mariozechner/pi-ai": "^0.67.68",
     "@mariozechner/pi-coding-agent": "^0.67.4",
     "@sinclair/typebox": "^0.34.49",
     "@types/node": "^25.6.0",
     "prettier": "^3.8.3",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.4"
   }
 }
