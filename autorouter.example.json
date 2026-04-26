@@ -1,8 +1,8 @@
 {
   "stickyTurns": 0,
   "classifier": {
-    "provider": "ollama",
-    "model": "gemma4-31b",
+    "provider": "openrouter",
+    "model": "google/gemini-2.5-flash-lite",
     "fallback": "normal",
     "guidance": "\n\nThink about what the user is asking:\n- Is it a quick, single-action task (run test, format, lint, check status, simple read)? → TRIVIAL\n- Does it need analysis, debugging, multi-step work, or code changes? → NORMAL\n- Is it architecturally complex or requires deep investigation? → COMPLEX",
     "categories": {
@@ -14,8 +14,8 @@
   },
   "routes": {
     "trivial": {
-      "provider": "ollama",
-      "model": "gemma4-31b"
+      "provider": "openrouter",
+      "model": "google/gemini-2.5-flash-lite"
     },
     "normal": {
       "provider": "openrouter",

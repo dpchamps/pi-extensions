@@ -1,0 +1,8 @@
+{
+  "name": "@dpchamps/pi-ralph",
+  "version": "0.1.0",
+  "description": "pi extension: /ralph — loop a prompt until a verification script succeeds",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module"
+}

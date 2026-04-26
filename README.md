@@ -8,6 +8,7 @@ Custom [skills](https://github.com/badlogic/pi-mono/tree/main/packages/coding-ag
 |------|------|-------------|
 | [autorouter](./extensions/autorouter/) | Extension | Auto-routes each prompt to the best model via classification |
 | [clear-command](./extensions/clear-command/) | Extension (command) | `/clear` — wipe conversation context (keeps session & costs) |
+| [ralph](./extensions/ralph/) | Extension (command) | `/ralph` — loop a prompt until a verify script exits 0 |
 | [web-fetch-tool](./extensions/web-fetch-tool/) | Extension (tool) | Fetch URLs and extract structured content (Reddit, Imgur, HTML) |
 
 ## Installing
@@ -49,6 +50,7 @@ Extensions:
 ```bash
 ln -s $(pwd)/extensions/autorouter ~/.pi/agent/extensions/autorouter
 ln -s $(pwd)/extensions/clear-command ~/.pi/agent/extensions/clear-command
+ln -s $(pwd)/extensions/ralph ~/.pi/agent/extensions/ralph
 ln -s $(pwd)/extensions/web-fetch-tool ~/.pi/agent/extensions/web-fetch-tool
 ```
 
