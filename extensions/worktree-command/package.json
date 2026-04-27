@@ -1,0 +1,8 @@
+{
+  "name": "@dpchamps/pi-worktree-command",
+  "version": "0.1.0",
+  "description": "pi extension: /worktree — create/merge/cleanup git worktrees forked from the current branch",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module"
+}
