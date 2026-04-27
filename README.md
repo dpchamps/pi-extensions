@@ -11,7 +11,7 @@ Custom [skills](https://github.com/badlogic/pi-mono/tree/main/packages/coding-ag
 | [file-command](./extensions/file-command/) | Extension (command) | `/file <path>` — open a file in `$VISUAL`/`$EDITOR` |
 | [ralph](./extensions/ralph/) | Extension (command) | `/ralph` — loop a prompt until a verify script exits 0 |
 | [web-fetch-tool](./extensions/web-fetch-tool/) | Extension (tool) | Fetch URLs and extract structured content (Reddit, Imgur, HTML) |
-| [worktree-command](./extensions/worktree-command/) | Extension (command) | `/worktree` — fork current branch into `.worktrees/`, merge back and cleanup |
+| [worktree-command](./extensions/worktree-command/) | Extension (command) | `/worktree` — fork branch into `.worktrees/`, switch/merge/cleanup, with autocomplete |
 
 ## Installing
 
