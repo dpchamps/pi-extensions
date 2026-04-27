@@ -1,0 +1,8 @@
+{
+  "name": "@dpchamps/pi-file-command",
+  "version": "0.1.0",
+  "description": "pi extension: /file <path> — open a file in $VISUAL/$EDITOR",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module"
+}
