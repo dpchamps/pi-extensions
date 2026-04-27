@@ -7,6 +7,7 @@ Custom [skills](https://github.com/badlogic/pi-mono/tree/main/packages/coding-ag
 | Name | Type | Description |
 |------|------|-------------|
 | [autorouter](./extensions/autorouter/) | Extension | Auto-routes each prompt to the best model via classification |
+| [background-command](./extensions/background-command/) | Extension (command) | `/background` — detach running task into a supervised pi RPC child; list/resume/kill/delete |
 | [clear-command](./extensions/clear-command/) | Extension (command) | `/clear` — wipe conversation context (keeps session & costs) |
 | [file-command](./extensions/file-command/) | Extension (command) | `/file <path>` — open a file in `$VISUAL`/`$EDITOR` |
 | [ralph](./extensions/ralph/) | Extension (command) | `/ralph` — loop a prompt until a verify script exits 0 |
