@@ -1,0 +1,4 @@
+{
+  "match": "https?://(www\\.)?arxiv\\.org/(abs|pdf)/[^?#]+",
+  "processor": "./processors/arxiv.js"
+}

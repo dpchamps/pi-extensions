@@ -1,7 +1,7 @@
 {
   "name": "@dpchamps/pi-web-fetch-tool",
   "version": "0.1.0",
-  "description": "pi extension: fetch URLs and extract structured content (Reddit, Imgur, HTML)",
+  "description": "pi extension: fetch URLs and extract structured content from webpages and supported domains",
   "author": "dpchamps",
   "license": "MIT",
   "type": "module",

@@ -1,11 +1,8 @@
 /**
  * web-fetch extension — fetches URLs and extracts structured content.
  *
- * Handles:
- *   - Reddit (subreddit listings, comment threads) via .json API
- *   - Imgur (albums, single images, direct links) via public API
- *   - Generic HTML pages via Readability + Turndown
- *   - Plain text / non-HTML responses as-is
+ * Supports domain-specific processors when available, plus generic HTML and
+ * plain-text extraction for everything else.
  */
 
 import { Type } from "@sinclair/typebox";
@@ -237,12 +234,12 @@ export default function (pi: ExtensionAPI) {
     label: "Web Fetch",
     description:
       "Fetch a URL and extract its content as markdown or structured JSON. " +
-      "Supports Reddit (subreddit listings, comment threads), Imgur (albums, images), " +
-      "and generic HTML pages. No API key or browser required.",
+      "Uses domain-specific processors when available, with generic extraction as a fallback. " +
+      "No API key or browser required.",
     promptSnippet: "Fetch and extract content from a URL",
     promptGuidelines: [
-      "Use web_fetch when you need to read a webpage, documentation, Reddit thread, or Imgur album.",
-      "web_fetch returns structured JSON for Reddit/Imgur and markdown for generic HTML pages.",
+      "Use web_fetch when you need to read a webpage, documentation, or other URL-based content.",
+      "web_fetch returns structured JSON for supported domains and markdown or text for generic pages.",
     ],
     parameters: Type.Object({
       url: Type.String({ description: "URL to fetch" }),

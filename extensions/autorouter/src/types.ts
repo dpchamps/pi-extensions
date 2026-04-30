@@ -7,6 +7,7 @@ export interface RouteConfig {
 }
 
 export interface AutorouterConfig {
+  enabled?: boolean;
   stickyTurns?: number;
   classifier: {
     provider: string;

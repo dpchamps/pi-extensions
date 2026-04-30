@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import processReddit from "./reddit";
 
+const asAny = <T>(value: T): any => value;
+
 describe("extractPost", () => {
   it("extracts essential fields from a post", () => {
     const json = {
@@ -29,7 +31,7 @@ describe("extractPost", () => {
       },
     };
 
-    const result = processReddit(json, "https://reddit.com/r/test.json");
+    const result = processReddit(asAny(json), "https://reddit.com/r/test.json");
 
     expect(result).toMatchObject({
       meta: {
@@ -77,7 +79,7 @@ describe("extractPost", () => {
       },
     };
 
-    const result = processReddit(json, "https://reddit.com/r/test.json");
+    const result = processReddit(asAny(json), "https://reddit.com/r/test.json");
 
     expect(result.posts[0]).toMatchObject({
       title: "Minimal Post",
@@ -112,7 +114,7 @@ describe("extractPost", () => {
       },
     };
 
-    const result = processReddit(json, "https://reddit.com/r/test.json");
+    const result = processReddit(asAny(json), "https://reddit.com/r/test.json");
 
     expect(result.posts).toHaveLength(1);
     expect(result.posts[0].title).toBe("Valid Post");
@@ -201,7 +203,10 @@ describe("flattenComments", () => {
       },
     ];
 
-    const result = processReddit(json, "https://reddit.com/r/test/comments/post123/test_post");
+    const result = processReddit(
+      asAny(json),
+      "https://reddit.com/r/test/comments/post123/test_post",
+    );
 
     expect(result).toMatchObject({
       title: "Test Post",
@@ -271,7 +276,10 @@ describe("flattenComments", () => {
       },
     ];
 
-    const result = processReddit(json, "https://reddit.com/r/test/comments/post/post");
+    const result = processReddit(
+      asAny(json),
+      "https://reddit.com/r/test/comments/post/post",
+    );
 
     expect(result.comments).toContainEqual({
       kind: "more",
@@ -340,7 +348,10 @@ describe("flattenComments", () => {
       { kind: "Listing", data: { children: [current] } },
     ];
 
-    const result = processReddit(json, "https://reddit.com/r/test/comments/post/post");
+    const result = processReddit(
+      asAny(json),
+      "https://reddit.com/r/test/comments/post/post",
+    );
 
     // Should have 4 comments total (3 nesting levels + 1 deep)
     expect(result.comments).toHaveLength(4);
@@ -359,7 +370,10 @@ describe("fallback handling", () => {
       data: { something: "else" },
     };
 
-    const result = processReddit(unknownFormat, "https://reddit.com/r/test.json");
+    const result = processReddit(
+      asAny(unknownFormat),
+      "https://reddit.com/r/test.json",
+    );
 
     expect(result).toEqual(unknownFormat);
   });
@@ -372,7 +386,7 @@ describe("fallback handling", () => {
       },
     };
 
-    const result = processReddit(emptyJson, "https://reddit.com/r/empty.json");
+    const result = processReddit(asAny(emptyJson), "https://reddit.com/r/empty.json");
 
     expect(result).toEqual({
       meta: {

@@ -67,6 +67,7 @@ Prompt 4: "explain the design"     → classify → read → claude-haiku-4-5 (s
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `enabled` | `boolean` | `true` | Whether autorouter is active at session start. Set `false` to start disabled (toggle on with `/autorouter on`) |
 | `stickyTurns` | `number` | `0` | Prompts to stay on the classified model |
 
 ### classifier

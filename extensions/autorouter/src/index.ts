@@ -67,11 +67,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     state.config = loadConfig(ctx.cwd);
-    state.enabled = true;
+    state.enabled = state.config?.enabled ?? true;
     state.tokenRoute = null;
     state.resetSticky();
     if (state.config) {
-      ctx.ui.setStatus("autorouter", ctx.ui.theme.fg("accent", `⟳ autorouter`));
+      ctx.ui.setStatus(
+        "autorouter",
+        ctx.ui.theme.fg("accent", state.enabled ? `⟳ autorouter` : `⟳ autorouter (off)`),
+      );
       updateModelStatus(ctx);
     } else {
       ctx.ui.setStatus("autorouter", undefined);

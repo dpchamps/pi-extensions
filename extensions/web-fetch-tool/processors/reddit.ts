@@ -50,7 +50,11 @@ interface RedditListing {
   };
 }
 
-type RedditJson = RedditListing | RedditListing[];
+function isRedditListing(value: unknown): value is RedditListing {
+  if (!value || typeof value !== "object") return false;
+  const obj = value as { kind?: unknown; data?: { children?: unknown } };
+  return obj.kind === "Listing" && Array.isArray(obj.data?.children);
+}
 
 /**
  * Extract the essential fields from a Reddit post (t3) object.
@@ -114,11 +118,16 @@ function flattenComments(
  * and the original URL, returns a clean object to be serialized as JSON.
  */
 export default function processReddit(
-  json: RedditJson,
-  originalUrl: string,
-): Record<string, unknown> {
+  json: unknown,
+  _originalUrl: string,
+): any {
   // Comment thread: array of 2 listings [post, comments]
-  if (Array.isArray(json) && json.length === 2 && json[0].kind === "Listing") {
+  if (
+    Array.isArray(json) &&
+    json.length === 2 &&
+    isRedditListing(json[0]) &&
+    isRedditListing(json[1])
+  ) {
     const postChildren = json[0].data.children;
     const commentChildren = json[1].data.children;
 
@@ -130,16 +139,17 @@ export default function processReddit(
   }
 
   // Subreddit listing: single listing of posts
-  if (
-    json.kind === "Listing" &&
-    Array.isArray(json.data.children)
-  ) {
+  if (isRedditListing(json)) {
     const posts = json.data.children
-      .map((child) => (child.kind === "t3" ? extractPost(child.data) : null))
-      .filter((p): p is RedditPost => p !== null);
+      .map((child: RedditChild) =>
+        child.kind === "t3" ? extractPost(child.data) : null
+      )
+      .filter((p: RedditPost | null): p is RedditPost => p !== null);
 
     const firstPostData = json.data.children[0]?.kind === "t3"
-      ? json.data.children[0].data as Record<string, unknown> & { subreddit?: string }
+      ? (json.data.children[0].data as Record<string, unknown> & {
+          subreddit?: string;
+        })
       : null;
     const meta = {
       subreddit: firstPostData?.subreddit,
@@ -150,5 +160,5 @@ export default function processReddit(
   }
 
   // Fallback: return as-is
-  return json as Record<string, unknown>;
+  return json;
 }
