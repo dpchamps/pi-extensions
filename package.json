@@ -17,7 +17,6 @@
   "pi": {
     "extensions": [
       "./extensions",
-      "./extensions/thinking-tool"
     ],
     "skills": [
       "./skills"
