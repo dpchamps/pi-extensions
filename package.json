@@ -4,7 +4,9 @@
   "private": true,
   "description": "Custom skills and extensions for the pi coding agent",
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "thinking",
+    "reasoning"
   ],
   "author": "dpchamps",
   "license": "MIT",
@@ -14,7 +16,8 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions"
+      "./extensions",
+      "./extensions/thinking-tool"
     ],
     "skills": [
       "./skills"
@@ -24,7 +27,8 @@
     "format": "prettier --write .",
     "typecheck": "npx tsc --noEmit",
     "test": "vitest run",
-    "test:web-fetch": "cd extensions/web-fetch-tool && npx vitest run"
+    "test:web-fetch": "cd extensions/web-fetch-tool && npx vitest run",
+    "test:thinking": "cd extensions/thinking-tool && npx vitest run"
   },
   "devDependencies": {
     "@mariozechner/pi-ai": "^0.67.68",
