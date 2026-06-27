@@ -1,5 +1,6 @@
 {
   "stickyTurns": 0,
+  "enabled": false,
   "classifier": {
     "provider": "openrouter",
     "model": "google/gemini-2.5-flash-lite",

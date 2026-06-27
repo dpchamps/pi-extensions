@@ -13,7 +13,7 @@ Adds `/worktree` to manage git worktrees forked from the current branch under `.
 /worktree switch <name>     # to that specific worktree
 ```
 
-When pi runs *inside* a linked worktree, the footer shows `worktree: <branch>` so you know which checkout you're in.
+When pi runs _inside_ a linked worktree, the footer shows `worktree: <branch>` so you know which checkout you're in.
 
 ## Behavior
 

@@ -6,163 +6,38 @@
  *   /worktree merge [<name>]   merge a linked worktree into its parent and clean up
  *   /worktree switch [<name>]  switch session/cwd to another worktree (or "main")
  *
- * Tab-completion: subcommands first, then linked-worktree branch names.
- * `switch` also offers "main" as an option.
+ * The git + session-fork primitives live in ./operations.ts and are also
+ * consumable by other extensions (e.g. /pipeline). This file is the
+ * user-facing CLI shell — argument parsing, interactive picker, UX
+ * notifications.
  *
  * On session start: if cwd is inside a linked worktree, set a persistent
  * "worktree: <branch>" status indicator (cleared otherwise).
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
-  ExecResult,
 } from "@mariozechner/pi-coding-agent";
 import {
   buildCompletionItems,
-  parentBranchOf,
   parseCompletionPrefix,
   type AutocompleteItem,
   type WorktreeRef,
 } from "./completion.js";
-
-async function git(
-  pi: ExtensionAPI,
-  cwd: string,
-  args: string[],
-): Promise<ExecResult> {
-  return await pi.exec("git", args, { cwd });
-}
-
-async function isGitRepo(pi: ExtensionAPI, cwd: string): Promise<boolean> {
-  const r = await git(pi, cwd, ["rev-parse", "--is-inside-work-tree"]);
-  return r.code === 0 && r.stdout.trim() === "true";
-}
-
-async function currentBranch(
-  pi: ExtensionAPI,
-  cwd: string,
-): Promise<string | null> {
-  const r = await git(pi, cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  if (r.code !== 0) return null;
-  const b = r.stdout.trim();
-  if (!b || b === "HEAD") return null;
-  return b;
-}
-
-async function isLinkedWorktree(
-  pi: ExtensionAPI,
-  cwd: string,
-): Promise<boolean> {
-  const common = await git(pi, cwd, ["rev-parse", "--git-common-dir"]);
-  const dir = await git(pi, cwd, ["rev-parse", "--git-dir"]);
-  if (common.code !== 0 || dir.code !== 0) return false;
-  return (
-    path.resolve(cwd, common.stdout.trim()) !==
-    path.resolve(cwd, dir.stdout.trim())
-  );
-}
-
-async function mainWorktreeDir(
-  pi: ExtensionAPI,
-  cwd: string,
-): Promise<string | null> {
-  const r = await git(pi, cwd, ["rev-parse", "--git-common-dir"]);
-  if (r.code !== 0) return null;
-  return path.dirname(path.resolve(cwd, r.stdout.trim()));
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-async function nextWorktreeIndex(
-  pi: ExtensionAPI,
-  cwd: string,
-  branch: string,
-): Promise<number> {
-  const r = await git(pi, cwd, [
-    "for-each-ref",
-    "--format=%(refname:short)",
-    "refs/heads/",
-  ]);
-  if (r.code !== 0) return 1;
-  const re = new RegExp(`^${escapeRegExp(branch)}-wt-(\\d+)$`);
-  let max = 0;
-  for (const line of r.stdout.split("\n")) {
-    const m = line.trim().match(re);
-    if (m) {
-      const n = Number.parseInt(m[1], 10);
-      if (Number.isFinite(n) && n > max) max = n;
-    }
-  }
-  return max + 1;
-}
-
-async function ensureGitignored(
-  repoRoot: string,
-  entry: string,
-): Promise<void> {
-  const gitignorePath = path.join(repoRoot, ".gitignore");
-  let contents = "";
-  try {
-    contents = await fs.promises.readFile(gitignorePath, "utf8");
-  } catch {
-    // file may not exist yet
-  }
-  const normalized = entry.replace(/^\/+|\/+$/g, "");
-  for (const line of contents.split("\n")) {
-    const stripped = line.trim().replace(/^\/+|\/+$/g, "");
-    if (stripped === normalized) return;
-  }
-  const sep = contents.length === 0 || contents.endsWith("\n") ? "" : "\n";
-  await fs.promises.writeFile(gitignorePath, `${contents}${sep}${entry}\n`);
-}
-
-async function isCleanTree(pi: ExtensionAPI, cwd: string): Promise<boolean> {
-  const r = await git(pi, cwd, ["status", "--porcelain"]);
-  return r.code === 0 && r.stdout.trim() === "";
-}
-
-interface WorktreeEntry {
-  path: string;
-  branch: string | null;
-}
-
-async function listWorktrees(
-  pi: ExtensionAPI,
-  mainDir: string,
-): Promise<WorktreeEntry[]> {
-  const r = await git(pi, mainDir, ["worktree", "list", "--porcelain"]);
-  if (r.code !== 0) return [];
-  const out: WorktreeEntry[] = [];
-  let curPath: string | undefined;
-  let curBranch: string | null = null;
-  const flush = () => {
-    if (curPath) out.push({ path: curPath, branch: curBranch });
-    curPath = undefined;
-    curBranch = null;
-  };
-  for (const line of r.stdout.split("\n")) {
-    if (line.startsWith("worktree ")) {
-      flush();
-      curPath = line.slice("worktree ".length).trim();
-    } else if (line.startsWith("branch ")) {
-      curBranch = line
-        .slice("branch ".length)
-        .trim()
-        .replace(/^refs\/heads\//, "");
-    } else if (line === "") {
-      flush();
-    }
-  }
-  flush();
-  return out;
-}
+import {
+  createWorktreeForkSession,
+  currentBranch,
+  flushSessionToDisk,
+  isGitRepo,
+  isLinkedWorktree,
+  listWorktrees,
+  mainWorktreeDir,
+  mergeWorktreeAndCleanup,
+} from "./operations.js";
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
@@ -170,8 +45,7 @@ export default function (pi: ExtensionAPI) {
     // Always set or clear: the UI status persists across session switches, so
     // when we /worktree merge back into main we need to wipe the prior wt label.
     const inLinked =
-      (await isGitRepo(pi, ctx.cwd)) &&
-      (await isLinkedWorktree(pi, ctx.cwd));
+      (await isGitRepo(pi, ctx.cwd)) && (await isLinkedWorktree(pi, ctx.cwd));
     const branch = inLinked ? await currentBranch(pi, ctx.cwd) : null;
     if (branch) {
       ctx.ui.setStatus(
@@ -237,115 +111,33 @@ async function runCreate(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
-  if (!(await isGitRepo(pi, ctx.cwd))) {
-    ctx.ui.notify("Worktree: not inside a git repository", "error");
+  const r = await createWorktreeForkSession(pi, ctx, {
+    withSession: async (replacementCtx, result) => {
+      notifyCreated(replacementCtx, result.handle, result.warnings);
+    },
+  });
+  if (!r.ok) {
+    ctx.ui.notify(`Worktree: ${r.error}`, "error");
     return;
   }
-  const branch = await currentBranch(pi, ctx.cwd);
-  if (!branch) {
-    ctx.ui.notify(
-      "Worktree: HEAD is detached or branch lookup failed",
-      "error",
-    );
-    return;
-  }
-  const mainDir = await mainWorktreeDir(pi, ctx.cwd);
-  if (!mainDir) {
-    ctx.ui.notify("Worktree: could not determine main worktree", "error");
-    return;
-  }
-
-  const n = await nextWorktreeIndex(pi, ctx.cwd, branch);
-  const newBranch = `${branch}-wt-${n}`;
-  const relPath = path.join(".worktrees", newBranch);
-  const absPath = path.resolve(mainDir, relPath);
-
-  const result = await git(pi, mainDir, [
-    "worktree",
-    "add",
-    "-b",
-    newBranch,
-    relPath,
-  ]);
-  if (result.code !== 0) {
-    ctx.ui.notify(
-      `Worktree: 'git worktree add' failed: ${result.stderr.trim() || result.stdout.trim()}`,
-      "error",
-    );
-    return;
-  }
-
-  try {
-    await ensureGitignored(mainDir, ".worktrees/");
-  } catch (e) {
-    ctx.ui.notify(
-      `Worktree: created but failed to update .gitignore: ${(e as Error).message}`,
-      "warning",
-    );
-  }
-
-  ctx.ui.notify(`Worktree: created ${newBranch} at ${absPath}`, "info");
-
-  // Fork the current session into the worktree's cwd. pi's switchSession()
-  // reads the new header's cwd and process.chdir()s to it, so the user lands
-  // in the worktree seamlessly with full conversation history preserved.
-  const sourceSessionFile = ctx.sessionManager.getSessionFile();
-  if (!sourceSessionFile) {
-    ctx.ui.notify(
-      "Worktree: created but no source session file to fork from",
-      "warning",
-    );
-    return;
-  }
-
-  const flushErr = await flushSessionToDisk(ctx, sourceSessionFile);
-  if (flushErr) {
-    ctx.ui.notify(`Worktree: created but ${flushErr}`, "warning");
-    return;
-  }
-
-  let forkedPath: string;
-  try {
-    const forked = SessionManager.forkFrom(sourceSessionFile, absPath);
-    const fp = forked.getSessionFile();
-    if (!fp) {
-      throw new Error("forked session has no file path");
-    }
-    forkedPath = fp;
-  } catch (e) {
-    ctx.ui.notify(
-      `Worktree: created but session fork failed: ${(e as Error).message}`,
-      "warning",
-    );
-    return;
-  }
-
-  await ctx.waitForIdle();
-  await ctx.switchSession(forkedPath);
+  if (r.switched) return;
+  notifyCreated(ctx, r.handle, r.warnings);
 }
 
-/**
- * Pi delays writing the session file to disk until the first assistant message.
- * forkFrom and parentSession lookups read from disk, so this helper materializes
- * the current in-memory session to its on-disk path when missing. Returns
- * undefined on success, or an error message string on failure.
- */
-async function flushSessionToDisk(
+function notifyCreated(
   ctx: ExtensionCommandContext,
-  sessionFile: string,
-): Promise<string | undefined> {
-  if (fs.existsSync(sessionFile)) return undefined;
-  const header = ctx.sessionManager.getHeader();
-  if (!header) return "current session has no header to flush";
-  const entries = ctx.sessionManager.getEntries();
-  const lines = [header, ...entries].map((e) => JSON.stringify(e)).join("\n");
-  try {
-    await fs.promises.mkdir(path.dirname(sessionFile), { recursive: true });
-    await fs.promises.writeFile(sessionFile, `${lines}\n`);
-  } catch (e) {
-    return `failed to flush source session: ${(e as Error).message}`;
+  handle: { branch: string; worktreePath: string },
+  warnings: string[] | undefined,
+): void {
+  ctx.ui.notify(
+    `Worktree: created ${handle.branch} at ${handle.worktreePath}`,
+    "info",
+  );
+  if (warnings) {
+    for (const w of warnings) {
+      ctx.ui.notify(`Worktree: ${w}`, "warning");
+    }
   }
-  return undefined;
 }
 
 async function runMerge(
@@ -406,123 +198,49 @@ async function runMerge(
     if (!target) return;
   }
 
-  const parent = parentBranchOf(target.branch);
-  if (!parent) {
-    ctx.ui.notify(
-      `Worktree: cannot derive parent branch from "${target.branch}" (expected <parent>-wt-<n>)`,
-      "error",
-    );
+  // Re-derive the parent for the notification (mergeWorktreeAndCleanup
+  // already validated the suffix, so this won't be null).
+  const parent = target.branch.replace(/-wt-\d+$/, "");
+  const r = await mergeWorktreeAndCleanup(
+    pi,
+    ctx,
+    {
+      worktreePath: target.path,
+      branch: target.branch,
+    },
+    {
+      withSession: async (replacementCtx, result) => {
+        notifyMerged(
+          replacementCtx,
+          target.branch,
+          parent,
+          result.warnings,
+        );
+      },
+    },
+  );
+  if (!r.ok) {
+    ctx.ui.notify(`Worktree: ${r.error}`, "error");
     return;
   }
+  if (r.switched) return;
+  notifyMerged(ctx, target.branch, parent, r.warnings);
+}
 
-  if (!(await isCleanTree(pi, target.path))) {
-    ctx.ui.notify(
-      `Worktree: ${target.branch} has uncommitted changes — commit or stash first`,
-      "error",
-    );
-    return;
-  }
-
-  const parentExists = await git(pi, mainDir, [
-    "rev-parse",
-    "--verify",
-    `refs/heads/${parent}`,
-  ]);
-  if (parentExists.code !== 0) {
-    ctx.ui.notify(
-      `Worktree: parent branch "${parent}" no longer exists`,
-      "error",
-    );
-    return;
-  }
-
-  // Is pi sitting inside the worktree we're about to remove? If so, we'll
-  // need to switch session out of it as the very last step.
-  const targetResolved = path.resolve(target.path);
-  const piInTarget =
-    cwdResolved === targetResolved ||
-    cwdResolved.startsWith(`${targetResolved}${path.sep}`);
-
-  // Pre-flush our session if we'll need it for the post-cleanup switch.
-  // (forkFrom reads from disk and the file may not exist yet.)
-  const sourceSessionFile = piInTarget
-    ? ctx.sessionManager.getSessionFile()
-    : undefined;
-  if (piInTarget) {
-    if (!sourceSessionFile) {
-      ctx.ui.notify(
-        "Worktree: cannot merge from inside worktree — no source session file",
-        "error",
-      );
-      return;
-    }
-    const flushErr = await flushSessionToDisk(ctx, sourceSessionFile);
-    if (flushErr) {
-      ctx.ui.notify(`Worktree: ${flushErr}`, "error");
-      return;
-    }
-  }
-
-  const originalMain = await currentBranch(pi, mainDir);
-  const needsRestoreMain =
-    originalMain !== null &&
-    originalMain !== parent &&
-    originalMain !== target.branch;
-
-  if (originalMain !== parent) {
-    const co = await git(pi, mainDir, ["checkout", parent]);
-    if (co.code !== 0) {
-      ctx.ui.notify(
-        `Worktree: failed to checkout parent "${parent}" in main: ${co.stderr.trim()}`,
-        "error",
-      );
-      return;
-    }
-  }
-
-  const merge = await git(pi, mainDir, ["merge", "--no-edit", target.branch]);
-  if (merge.code !== 0) {
-    await git(pi, mainDir, ["merge", "--abort"]);
-    if (needsRestoreMain && originalMain) {
-      await git(pi, mainDir, ["checkout", originalMain]);
-    }
-    ctx.ui.notify(
-      `Worktree: merge of ${target.branch} into ${parent} failed (conflicts) — aborted`,
-      "error",
-    );
-    return;
-  }
-
-  // Removal uses cwd=mainDir, so it's safe to issue even when process.cwd()
-  // is inside the worktree being removed — git itself doesn't care, and we
-  // won't access the deleted path before switchSession chdir's us out.
-  const remove = await git(pi, mainDir, ["worktree", "remove", target.path]);
-  if (remove.code !== 0) {
-    ctx.ui.notify(
-      `Worktree: merged but failed to remove worktree: ${remove.stderr.trim()}`,
-      "warning",
-    );
-  }
-
-  const del = await git(pi, mainDir, ["branch", "-d", target.branch]);
-  if (del.code !== 0) {
-    ctx.ui.notify(
-      `Worktree: merged but failed to delete branch ${target.branch}: ${del.stderr.trim()}`,
-      "warning",
-    );
-  }
-
-  if (needsRestoreMain && originalMain) {
-    await git(pi, mainDir, ["checkout", originalMain]);
-  }
-
+function notifyMerged(
+  ctx: ExtensionCommandContext,
+  branch: string,
+  parent: string,
+  warnings: string[] | undefined,
+): void {
   ctx.ui.notify(
-    `Worktree: merged ${target.branch} into ${parent} and cleaned up`,
+    `Worktree: merged ${branch} into ${parent} and cleaned up`,
     "info",
   );
-
-  if (piInTarget && sourceSessionFile) {
-    await switchOutOfWorktree(ctx, mainDir, sourceSessionFile);
+  if (warnings) {
+    for (const w of warnings) {
+      ctx.ui.notify(`Worktree: ${w}`, "warning");
+    }
   }
 }
 
@@ -609,10 +327,7 @@ async function runSwitch(
   if (!destPath) {
     const sourceFile = ctx.sessionManager.getSessionFile();
     if (!sourceFile) {
-      ctx.ui.notify(
-        "Worktree: no source session file to fork from",
-        "error",
-      );
+      ctx.ui.notify("Worktree: no source session file to fork from", "error");
       return;
     }
     const flushErr = await flushSessionToDisk(ctx, sourceFile);
@@ -636,37 +351,4 @@ async function runSwitch(
 
   await ctx.waitForIdle();
   await ctx.switchSession(destPath);
-}
-
-/**
- * Move pi's session out of a worktree directory that's about to be (or was just)
- * removed. Prefers the parent session recorded in the current session header
- * (the session we forked from on /worktree create); falls back to forking the
- * current session into mainDir so the conversation history isn't lost.
- */
-async function switchOutOfWorktree(
-  ctx: ExtensionCommandContext,
-  mainDir: string,
-  sourceSessionFile: string,
-): Promise<void> {
-  const header = ctx.sessionManager.getHeader();
-  const parentPath = header?.parentSession;
-  await ctx.waitForIdle();
-
-  if (parentPath && fs.existsSync(parentPath)) {
-    await ctx.switchSession(parentPath);
-    return;
-  }
-
-  try {
-    const forked = SessionManager.forkFrom(sourceSessionFile, mainDir);
-    const fp = forked.getSessionFile();
-    if (!fp) throw new Error("forked session has no file path");
-    await ctx.switchSession(fp);
-  } catch (e) {
-    ctx.ui.notify(
-      `Worktree: cleanup done but couldn't return to main session: ${(e as Error).message}`,
-      "warning",
-    );
-  }
 }

@@ -12,7 +12,10 @@ describe("parseCompletionPrefix", () => {
   });
 
   it("returns subcommand stage with the prefix while still typing the first token", () => {
-    expect(parseCompletionPrefix("m")).toEqual({ stage: "sub", argPrefix: "m" });
+    expect(parseCompletionPrefix("m")).toEqual({
+      stage: "sub",
+      argPrefix: "m",
+    });
     expect(parseCompletionPrefix("merge")).toEqual({
       stage: "sub",
       argPrefix: "merge",
