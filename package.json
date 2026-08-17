@@ -16,7 +16,7 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions",
+      "./extensions"
     ],
     "skills": [
       "./skills"
@@ -27,7 +27,8 @@
     "typecheck": "npx tsc --noEmit",
     "test": "vitest run",
     "test:web-fetch": "cd extensions/web-fetch-tool && npx vitest run",
-    "test:thinking": "cd extensions/thinking-tool && npx vitest run"
+    "test:thinking": "cd extensions/thinking-tool && npx vitest run",
+    "test:runinfra": "cd extensions/runinfra && npx vitest run"
   },
   "devDependencies": {
     "@mariozechner/pi-ai": "^0.67.68",

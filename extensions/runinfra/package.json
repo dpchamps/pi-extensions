@@ -1,0 +1,31 @@
+{
+  "name": "@dpchamps/pi-runinfra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pi extension: RunInfer provider — /login with a workspace API key, models pulled live from the RunInfer API",
+  "keywords": [
+    "pi-package",
+    "runinfra",
+    "provider",
+    "openai"
+  ],
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.83.0",
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.2"
+  },
+  "pi": {
+    "extensions": [
+      "."
+    ]
+  }
+}
