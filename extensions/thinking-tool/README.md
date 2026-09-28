@@ -1,5 +1,7 @@
 # thinking-tool
 
+> **Deprecated (2026-09):** thinking-tool was an early experiment and largely a failure. It is no longer loaded by pi — the repo root `package.json` excludes it via the `pi.extensions` patterns. The code here is kept for reference only.
+
 Calls the VibeThinker-3B reasoning model for complex reasoning tasks.
 
 ## Overview

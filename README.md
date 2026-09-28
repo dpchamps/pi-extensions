@@ -6,15 +6,22 @@ Custom [skills](https://github.com/badlogic/pi-mono/tree/main/packages/coding-ag
 
 | Name | Type | Description |
 |------|------|-------------|
-| [autorouter](./extensions/autorouter/) | Extension | Auto-routes each prompt to the best model via classification |
 | [background-command](./extensions/background-command/) | Extension (command) | `/background` — detach running task into a supervised pi RPC child; list/resume/kill/delete |
 | [clear-command](./extensions/clear-command/) | Extension (command) | `/clear` — wipe conversation context (keeps session & costs) |
 | [file-command](./extensions/file-command/) | Extension (command) | `/file <path>` — open a file in `$VISUAL`/`$EDITOR` |
 | [pipeline-command](./extensions/pipeline-command/) | Extension (command) | `/pipeline` — execute JSON-defined pipelines of agent steps with optional model/system-prompt/script/worktree overrides |
 | [ralph](./extensions/ralph/) | Extension (command) | `/ralph` — loop a prompt until a verify script exits 0 |
-| [thinking-tool](./extensions/thinking-tool/) | Extension (tool) | `/think` — call VibeThinker-3B for complex reasoning tasks with full traces |
 | [web-fetch-tool](./extensions/web-fetch-tool/) | Extension (tool) | Fetch URLs and extract structured content from webpages and supported domains |
 | [worktree-command](./extensions/worktree-command/) | Extension (command) | `/worktree` — fork branch into `.worktrees/`, switch/merge/cleanup, with autocomplete |
+
+## Deprecated
+
+| Name | Type | Description |
+|------|------|-------------|
+| [autorouter](./extensions/autorouter/) | Extension | Auto-routes each prompt to the best model via classification |
+| [thinking-tool](./extensions/thinking-tool/) | Extension (tool) | `/think` — call VibeThinker-3B for complex reasoning tasks with full traces |
+
+These were early experiments and largely failures. They are **no longer loaded by pi** — the repo root `package.json` excludes them via `!extensions/...` entries in the `pi.extensions` manifest. Their code is kept in the repo for reference only.
 
 ## Installing
 
@@ -23,6 +30,8 @@ pi install git:github.com/dpchamps/dpchamps-pi-harness
 ```
 
 ## Quick Start: VibeThinker-3B Thinking Tool
+
+> **Deprecated:** thinking-tool was an early experiment and is no longer loaded by pi. The steps below are kept for reference only.
 
 1. **Run VibeThinker-3B** (must be accessible at the endpoint):
    ```bash
@@ -45,6 +54,8 @@ pi install git:github.com/dpchamps/dpchamps-pi-harness
 See [AGENTS.md](./AGENTS.md) for full documentation on all extensions.
 
 ## VibeThinker-3B Background
+
+> **Deprecated:** the thinking-tool extension described below is an early experiment and is no longer loaded by pi. Kept for reference only.
 
 VibeThinker-3B is a 3B-parameter model optimized for verifiable reasoning tasks:
 - **76.4** on IMO-AnswerBench (IMO-level math)

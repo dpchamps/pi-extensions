@@ -1,5 +1,7 @@
 # Autorouter
 
+> **Deprecated (2026-09):** Autorouter was an early experiment and largely a failure. It is no longer loaded by pi — the repo root `package.json` excludes it via the `pi.extensions` patterns. The code here is kept for reference only; `~/.pi/agent/autorouter.json` config is no longer read.
+
 Automatically switches the model per prompt based on task classification.
 
 ```
