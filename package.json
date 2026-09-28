@@ -34,6 +34,7 @@
     "test:runinfra": "cd extensions/runinfra && npx vitest run"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
     "@mariozechner/pi-ai": "^0.67.68",
     "@mariozechner/pi-coding-agent": "^0.67.4",
     "@sinclair/typebox": "^0.34.49",

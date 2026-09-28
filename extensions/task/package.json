@@ -1,0 +1,8 @@
+{
+  "name": "@dpchamps/pi-task",
+  "version": "0.2.0",
+  "description": "pi extension: /task — run a task until a verification command succeeds",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module"
+}

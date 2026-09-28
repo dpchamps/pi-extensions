@@ -15,7 +15,7 @@ Tab completion offers the subcommands first, then `.json` files under cwd (depth
 
 A pipeline is a JSON file declaring **units** (one agent iteration each) and a **flow** of directed edges between them with conditions and termination. The runner walks the graph, runs each visited unit's lifecycle (pre-script → prompt → post-script, optionally inside a fresh worktree), records the result, evaluates outgoing edges in declaration order, and follows the first one whose condition matches.
 
-A unit with no overrides is a plain ralph iteration on the baseline model. A pipeline with one unit and a self-loop on `postExitCode != 0` is the legacy `/ralph` form.
+A unit with no overrides is a plain task iteration on the baseline model. A pipeline with one unit and a self-loop on `postExitCode != 0` is the same shape as `/task`.
 
 ## DSL
 
@@ -65,7 +65,7 @@ A unit with no overrides is a plain ralph iteration on the baseline model. A pip
 
 ### Units
 
-Every field except `id` is optional. A unit with nothing else is a plain ralph iteration.
+Every field except `id` is optional. A unit with nothing else is a plain task iteration.
 
 | field          | type                                  | semantics                                                                                                                                                                                                                                                         |
 | -------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

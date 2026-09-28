@@ -10,7 +10,7 @@ Custom [skills](https://github.com/badlogic/pi-mono/tree/main/packages/coding-ag
 | [clear-command](./extensions/clear-command/) | Extension (command) | `/clear` — wipe conversation context (keeps session & costs) |
 | [file-command](./extensions/file-command/) | Extension (command) | `/file <path>` — open a file in `$VISUAL`/`$EDITOR` |
 | [pipeline-command](./extensions/pipeline-command/) | Extension (command) | `/pipeline` — execute JSON-defined pipelines of agent steps with optional model/system-prompt/script/worktree overrides |
-| [ralph](./extensions/ralph/) | Extension (command) | `/ralph` — loop a prompt until a verify script exits 0 |
+| [task](./extensions/task/) | Extension (command) | `/task` — run a task until a verification command succeeds (loop with nudges, cap, abort-on-input) |
 | [web-fetch-tool](./extensions/web-fetch-tool/) | Extension (tool) | Fetch URLs and extract structured content from webpages and supported domains |
 | [worktree-command](./extensions/worktree-command/) | Extension (command) | `/worktree` — fork branch into `.worktrees/`, switch/merge/cleanup, with autocomplete |
 

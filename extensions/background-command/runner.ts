@@ -184,7 +184,7 @@ export async function flushSessionToDisk(
  * Find the most recent interactive (non-extension-sourced) user message in the
  * session entries. Returns the entry plus its extracted text, or null if none.
  *
- * Filters out programmatic prompts (e.g. ralph's auto-issued user messages)
+ * Filters out programmatic prompts (e.g. task's auto-issued user messages)
  * by skipping entries whose AgentMessage has source !== "interactive". When
  * source is missing on older entries, we treat them as user-authored.
  */
