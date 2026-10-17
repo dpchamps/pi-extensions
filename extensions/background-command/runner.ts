@@ -17,7 +17,7 @@ import type {
   ExtensionCommandContext,
   SessionEntry,
   SessionMessageEntry,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 export interface RpcChildOptions {
   cwd: string;

@@ -4,5 +4,8 @@
   "description": "pi extension: /clear command — clear context, preserve session",
   "author": "dpchamps",
   "license": "MIT",
-  "type": "module"
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
 }

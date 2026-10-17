@@ -5,8 +5,8 @@
  * plain-text extraction for everything else.
  */
 
-import { Type } from "@sinclair/typebox";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { readFileSync, readdirSync } from "fs";

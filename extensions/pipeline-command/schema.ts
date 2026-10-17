@@ -3,7 +3,7 @@
  * and runtime validation.
  */
 
-import { Type, type Static, type TSchema } from "@sinclair/typebox";
+import { Type, type Static, type TSchema } from "typebox";
 
 const Thinking = Type.Union([
   Type.Literal("off"),
@@ -12,6 +12,7 @@ const Thinking = Type.Union([
   Type.Literal("medium"),
   Type.Literal("high"),
   Type.Literal("xhigh"),
+  Type.Literal("max"),
 ]);
 
 const ModelRef = Type.Object(

@@ -4,5 +4,8 @@
   "description": "pi extension: /task — run a task until a verification command succeeds",
   "author": "dpchamps",
   "license": "MIT",
-  "type": "module"
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
 }

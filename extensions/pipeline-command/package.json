@@ -11,8 +11,12 @@
     "./lowering": "./lowering.ts",
     "./schema": "./schema.ts"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.49",
     "@dpchamps/pi-worktree-command": "*"
   }
 }

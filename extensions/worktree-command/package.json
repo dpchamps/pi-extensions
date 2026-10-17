@@ -5,6 +5,9 @@
   "author": "dpchamps",
   "license": "MIT",
   "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
   "main": "./index.ts",
   "exports": {
     ".": "./index.ts",

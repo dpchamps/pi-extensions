@@ -10,12 +10,12 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExecResult,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { parentBranchOf } from "./completion.js";
 
 export interface WorktreeHandle {

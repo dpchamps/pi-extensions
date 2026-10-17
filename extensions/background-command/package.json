@@ -4,5 +4,8 @@
   "description": "pi extension: /background — detach a running foreground task into a supervised background pi RPC child",
   "author": "dpchamps",
   "license": "MIT",
-  "type": "module"
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
 }

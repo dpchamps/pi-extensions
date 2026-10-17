@@ -18,8 +18,8 @@ import * as path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
-} from "@mariozechner/pi-coding-agent";
-import type { Model } from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 import {
   buildCompletionItems,
   parseCompletionPrefix,
@@ -28,7 +28,7 @@ import {
 import { loadPipeline, PipelineLoadError } from "./loader.js";
 import { executePipeline, type PipelineOverrideState } from "./runner.js";
 
-type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
 interface ActivePipeline {
   aborted: boolean;

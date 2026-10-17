@@ -5,6 +5,10 @@
   "author": "dpchamps",
   "license": "MIT",
   "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "jsdom": "^27.0.1",

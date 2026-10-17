@@ -6,7 +6,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Value } from "@sinclair/typebox/value";
+import { Value } from "typebox/value";
 import { Pipeline, type TPipeline, type TPromptObj } from "./schema.js";
 
 export class PipelineLoadError extends Error {
@@ -50,7 +50,7 @@ export async function loadPipeline(filePath: string): Promise<LoadedPipeline> {
   if (!Value.Check(Pipeline, parsed)) {
     const issues: string[] = [];
     for (const err of Value.Errors(Pipeline, parsed)) {
-      issues.push(`${err.path || "/"}: ${err.message}`);
+      issues.push(`${err.instancePath || "/"}: ${err.message}`);
       if (issues.length >= 10) break;
     }
     throw new PipelineLoadError(

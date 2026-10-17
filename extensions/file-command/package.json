@@ -4,5 +4,8 @@
   "description": "pi extension: /file <path> — open a file in $VISUAL/$EDITOR",
   "author": "dpchamps",
   "license": "MIT",
-  "type": "module"
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
 }

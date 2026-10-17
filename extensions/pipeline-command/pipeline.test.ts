@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Value } from "@sinclair/typebox/value";
+import { Value } from "typebox/value";
 import { Pipeline } from "./schema.js";
 import {
   loadPipeline,
@@ -80,6 +80,17 @@ describe("Pipeline schema", () => {
       false,
     );
   });
+
+  it.each(["off", "minimal", "low", "medium", "high", "xhigh", "max"])(
+    "accepts the %s thinking level",
+    (thinking) => {
+      expect(
+        Value.Check(Pipeline, {
+          units: [{ id: "a", model: { provider: "x", model: "y", thinking } }],
+        }),
+      ).toBe(true);
+    },
+  );
 
   it("rejects unknown thinking level", () => {
     expect(
@@ -310,6 +321,7 @@ describe("loadPipeline", () => {
     } catch (e) {
       expect(e).toBeInstanceOf(PipelineLoadError);
       expect((e as PipelineLoadError).issues.length).toBeGreaterThan(0);
+      expect((e as PipelineLoadError).issues[0]).toMatch(/^\/units:/);
     }
   });
 

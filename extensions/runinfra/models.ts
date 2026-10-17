@@ -1,4 +1,4 @@
-import type { Model, OpenAICompletionsCompat, ThinkingLevelMap } from "@earendil-works/pi-ai/compat";
+import type { Model, OpenAICompletionsCompat, ThinkingLevelMap } from "@earendil-works/pi-ai";
 
 /** Stable provider id used across pi (login, /model, models-store.json). */
 export const RUNINFRA_PROVIDER_ID = "runinfra";

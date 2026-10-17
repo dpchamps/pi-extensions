@@ -1,5 +1,8 @@
-import { createProvider, openAICompletionsApi } from "@earendil-works/pi-ai/compat";
-import type { RefreshModelsContext } from "@earendil-works/pi-ai/compat";
+import {
+  createProvider,
+  openAICompletionsApi,
+  type RefreshModelsContext,
+} from "@earendil-works/pi-ai/compat";
 import {
   RUNINFRA_BASE_URL,
   RUNINFRA_PROVIDER_ID,
@@ -93,8 +96,7 @@ export function createRunInfraProvider() {
       const key = credential?.type === "api_key" ? credential.key : undefined;
       if (!key) {
         // Not logged in yet; keep the cached catalog (if any) instead of wiping it.
-        const stored = await context.store.read();
-        return stored?.models ?? [];
+        return context.stored?.models ?? [];
       }
       const response = await fetchRunInfraModels(key, context.signal);
       if (context.signal?.aborted) {

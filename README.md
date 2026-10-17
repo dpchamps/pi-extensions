@@ -1,6 +1,18 @@
 # dpchamps-pi-harness
 
-Custom [skills](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent/docs/skills.md) and [extensions](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent/docs/extensions.md) for the [pi coding agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent).
+Custom [skills](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md) and [extensions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md) for the [pi coding agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent).
+
+## Development
+
+Active extensions target **Pi 1.3.0** using the `@earendil-works` packages and Pi's host-provided TypeBox. Deprecated experiments retain their legacy dependencies and are not loaded automatically.
+
+```bash
+npm install --ignore-scripts
+npm run typecheck
+npm test
+```
+
+The compatibility tests load every active extension through Pi and verify that `before_agent_start` runs once per agent run, while unchanged named prompt sections are not appended again.
 
 ## Contents
 
