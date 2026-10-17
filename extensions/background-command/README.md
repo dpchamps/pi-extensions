@@ -1,93 +1,83 @@
 # background-command
 
-Adds `/background` to detach a running foreground task into a supervised `pi --mode rpc` child process. Background tasks are listable, resumable into the foreground, killable, and deletable. Subcommands and task IDs are tab-completable.
+`/background` **aborts and replays a live user request** in a supervised Pi RPC child. It does **not** move a running provider stream, shell command, tool execution, queue, or extension's in-memory state.
+
+Requires Pi 1.3+ and an interactive or RPC UI. Every replay requires confirmation: completed side effects can repeat, and foreground/background processes **share the same workspace**. Use separate worktrees when concurrent edits need isolation.
 
 ## Usage
 
-```
-/background                 # detach the running foreground task
-/background list            # show all tasks (interactive picker → resume)
-/background list active     # filter by status: active|paused|killed
-/background resume <id>     # stop child, swap foreground session to it
-/background kill <id>       # terminate child, keep metadata + session file
-/background delete <id>     # kill if alive, remove from registry + session file
-```
-
-When at least one task is tracked, the footer shows `bg: 2A 1P 1K` (active / paused / killed counts).
-
-## Behavior
-
-### Detach (`/background`)
-
-Triggered while the agent is mid-stream (or right after a user message but before the agent responds):
-
-1. Walks `getEntries()` backward to find the most recent interactive (`source === "interactive"`) user message.
-2. Calls `ctx.abort()` to stop the in-flight provider request, then `ctx.waitForIdle()` to let cancellation reach disk.
-3. `flushSessionToDisk` materializes the in-memory session if pi hadn't written it yet (mirrors the pattern used by `worktree-command`).
-4. `SessionManager.forkFrom(currentSessionFile, cwd)` creates a fork. The fork is then `branch()`'d back to the parent of the captured user message (or `resetLeaf()` if it was the root) — so the child will replay the prompt from a clean state instead of inheriting the parent's already-asked leaf.
-5. Spawns a `pi --mode rpc --session <forkedPath>` child via `RpcChild` (a small JSONL-protocol wrapper around `child_process.spawn`).
-6. Re-issues the captured prompt to the child via the `prompt` RPC command. Fire-and-forget; status updates flow through `agent_start` / `agent_end` events.
-7. Drops a `CustomMessageEntry` (`customType: "background-detach"`, `display: true`) into the parent transcript so both the user and the LLM can see what was handed off. The parent session keeps the orphaned user message + any partial assistant entry — extensions can't mutate the foreground session's leaf, so the next interactive turn just chains under the orphan, which is fine.
-8. Sets the footer indicator and notifies the user with the task id.
-
-### List (`/background list [active|paused|killed]`)
-
-Renders tracked tasks as a tree by `parentSessionFile` lineage. A task detached from the foreground is a root; a task detached after resuming `bg-1` and starting fresh work nests under `bg-1`. The render uses `└─` / `├─` indent prefixes and includes `[status]`, a 50-char prompt preview, and a relative timestamp:
-
-```
-bg-1  [active]   refactor the auth module to use JWT  (5m ago)
-└─ bg-3  [paused]  rotate existing tokens once issuer changes  (1m ago)
-bg-2  [killed]   long flaky test loop on payments  (10m ago)
+```text
+/background                 # confirm replay of the current live user request
+/background list            # task picker → resume
+/background list active     # active|paused|killed filter
+/background resume <id>     # stop child, open its session in the foreground
+/background kill <id>       # stop child, preserve task metadata and session
+/background delete <id>     # stop child, remove metadata and its session file
 ```
 
-The list is shown via `ctx.ui.select`; picking any line resumes that task.
+Subcommands, filters, and task IDs support tab completion. Resume includes stopped/crashed tasks because their session files can still be opened. Kill completion only includes live children.
 
-### Resume (`/background resume <id>`)
+## Request selection and replay
 
-1. `RpcChild.stop()` — graceful SIGTERM with a 1.5s grace before SIGKILL. Two processes can't safely write the same JSONL, so the child must exit before the foreground takes over.
-2. `await ctx.waitForIdle()` to let the foreground settle.
-3. `ctx.switchSession(task.sessionFile)` — pi reads the session header's `cwd` and swaps the foreground in place. Same pattern as `worktree-command` switch.
-4. The task is removed from the registry on success — once resumed it's just an ordinary session.
+Only an unambiguous, currently running request originating from interactive or RPC user input is eligible. The extension observes input provenance and the actual user message, then checks the **active branch**. It never guesses provenance from fields in persisted messages.
 
-### Kill (`/background kill <id>`)
+Idle/completed requests, runs restored without observed provenance, custom-message runs, extension-started requests (including `/task`), and runs receiving additional queued input are rejected. The request is revalidated after confirmation; completing or changing the run while the dialog is open cancels the handoff.
 
-Aborts any in-flight stream in the child and stops the process. Marks `killed: true`. The session file is preserved; you can still `delete` it later or leave it for archival.
+After cancellation settles, the extension writes a new private JSONL snapshot containing only the active path **before** the captured request. It does not mutate a disposable manager's leaf or manually flush the source session. Reopening the snapshot therefore selects the same intended branch. The original session retains the request and partial work. Text and images, including image-only prompts, are sent to the child; a visible, context-only replay marker is added to the parent only after acceptance.
 
-### Delete (`/background delete <id>`)
+Replay is a new input, so input/provider hooks run in the child too. Do not use it for operations that cannot safely be repeated. Extension state is deliberately not guessed or migrated.
 
-Kills if alive, then removes the registry entry and unlinks the forked session file from disk. Use `kill` instead if you want to preserve the session.
+## Configuration and permissions
 
-## Status taxonomy
+Children use the host's Pi installation, not a `pi` executable found on PATH. Relevant CLI resource, tool, permission, offline, and extension flags are inherited, with relative resource paths resolved against the original launch directory. Prompts, `@files`, one-shot actions, and parent session selectors are not inherited.
 
-| Status   | Determination                                                     |
-|----------|-------------------------------------------------------------------|
-| `active` | child alive AND last observed event was `agent_start` (streaming) |
-| `paused` | child alive AND last observed event was `agent_end` (idle)        |
-| `killed` | child process is dead, either by `kill` or by crash               |
+The current project-trust decision, model, thinking level, effective system prompt, and active tool names are captured. A CLI API-key override is forwarded only to its original provider, never to a different provider after a model switch. A private bootstrap extension restores the prompt/tool loadout. If a required dynamic tool is unavailable, it disables tools and aborts before any provider request instead of broadening permissions. Startup verifies the child's session and selected model.
 
-Status is queried lazily off the cached `isStreaming` flag — no per-`list` RPC round-trip.
+Explicitly loaded permission extensions remain loaded. Child confirmation/input/select/editor dialogs are **cancelled**, never approved automatically. The parent receives a warning telling the user to resume the task for interaction. Child notifications, extension errors, provider failures, and bounded stderr diagnostics are surfaced as well.
 
-## Lifecycle
+SDK hosts can supply `BackgroundOptions.launchArgs`, `createClient`, and a separate `BackgroundSupervisor`; arbitrary SDK-only providers and extension closures cannot be reconstructed by a subprocess. Recreating equivalent provider/resource configuration is the host's responsibility. Missing configuration fails visibly, preserving both sessions.
 
-Children are **supervised**: they die when the parent pi exits. A `session_shutdown` hook walks the registry and stops every `RpcChild` so no `pi --mode rpc` processes are orphaned. The registry itself is in-memory and does not survive a parent pi restart.
+## Process lifecycle and session ownership
 
-A soft warning fires at 5 concurrent live tasks — child pi processes carry a non-trivial memory footprint, and there's no benefit to running dozens.
+**Upgrading the old implementation:** finish or resume existing background work before the first reload. Its closure-local registry cannot be migrated into the new supervisor.
 
-## Autocomplete
+A process-scoped supervisor survives `/new`, `/resume`, `/fork`, and `/reload`, even when the extension module is reloaded. Its callbacks hold no old Pi/context objects. UI subscribers are rebound on session start, and diagnostic notices are buffered between sessions. Mutation commands are serialized. Reload/quit cancels pending command dialogs so they cannot block shutdown; established children survive reload.
 
-`registerCommand({ getArgumentCompletions })` is wired up:
+An orderly parent **quit** while this extension is loaded stops all tracked children; session replacement does not. A synchronous process-exit fallback also signals children if the user has left for a workspace that does not load the extension; that last-resort path cannot await termination. Shutdown clears queued work and awaits a bounded abort before stdin EOF for graceful disposal, then SIGTERM and SIGKILL as necessary, and awaits confirmed process closure. Failed startup/handshake also attempts cleanup. Abrupt process/OS failure cannot guarantee disposal of descendants or temporary files. The registry does not survive a parent process restart; saved session files do.
 
-- First token: `list | resume | kill | delete` filtered by what's been typed.
-- Second token (after `list`): `active | paused | killed` status filter.
-- Second token (after `resume` or `kill`): IDs of currently-alive tasks. Description shows `[status] <prompt preview>`.
-- Second token (after `delete`): all task IDs (including killed).
+Resume stops only the selected child. If foreground work is active, it first asks permission to abort that work; it does not silently stop a background child and wait indefinitely. Cancellation has a deadline. The session is not switched, and a session file is not unlinked, if child termination is uncertain. Built-in resume of a live managed child's JSONL is blocked; use `/background resume` to transfer ownership safely.
 
-Pure parsing/build logic lives in `completion.ts` and is unit-tested without pi runtime imports — same split pattern as `worktree-command/completion.ts`.
+If another extension cancels or rejects the session switch **after** the child has stopped, the task remains accurately marked dead and its session is preserved. Retry `/background resume <id>`; the extension does not automatically replay work again. Missing files and failed unlinks retain task metadata for recovery/retry. Post-switch work uses Pi's fresh `withSession` context.
 
-## Files
+## Status and lineage
 
-- `index.ts` — command registration, hooks, handler dispatch (`runDetach`, `runList`, `runResume`, `runKill`, `runDelete`), footer status rendering.
-- `runner.ts` — `RpcChild` (minimal JSONL-protocol pi RPC client), `flushSessionToDisk`, `findLastInteractiveUserMessage`.
-- `store.ts` — `BackgroundStore` (in-memory Map keyed by id), `allocId`, `tree()` assembly by `parentSessionFile`.
-- `completion.ts` — `parseCompletionPrefix`, `buildCompletionItems`, `truncatePrompt`. No pi imports.
-- `completion.test.ts` — vitest covering parse/build/truncate.
+The footer shows counts such as `bg: 2A 1P 1K`:
+
+| Status   | Meaning                                                                                      |
+| -------- | -------------------------------------------------------------------------------------------- |
+| `active` | A live child is starting/running or still has automatic retry/recovery work.                 |
+| `paused` | A live child has settled, or its prompt was handled without starting a run.                  |
+| `killed` | The child was stopped, crashed, or failed startup. Its saved session may still be resumable. |
+
+`agent_settled`, not an intermediate `agent_end`, determines idle status. Process exits are observed independently. Errors also appear in list rows.
+
+Tasks are shown in session-lineage order. Resumed tasks leave the actionable registry, but their lineage is retained: when descendants are tracked, historical parents appear as **resumed ancestor** rows. These rows are context only, not selectable tasks. Status filters retain ancestor context, and IDs remain monotonic across session changes/reloads.
+
+## Tests
+
+```sh
+npx vitest run extensions/background-command
+npx tsc --noEmit -p extensions/background-command/tsconfig.json
+```
+
+Tests cover completions, provenance, persistent branch snapshots, lineage, global supervision, real Pi session replacement/reload, image replay, failures/cancellation, RPC framing, startup/readiness, dialogs, and forced termination. Real CLI integration tests use an isolated local faux provider; they make no live model requests.
+
+## Implementation
+
+- `index.ts`: lifecycle bindings, commands, confirmation, UI, and handoff.
+- `supervisor.ts`: process-lifetime registry, mutation guard, subscribers, shutdown.
+- `store.ts`: task status, IDs, and historical lineage.
+- `prompt.ts`: live input provenance and active-branch matching.
+- `launch.ts`: host executable and CLI configuration inheritance.
+- `runner.ts`: branch snapshots and supervised RPC transport. Pi exports `RpcClient`, but this transport additionally needs raw UI cancellation, bounded diagnostics, a readiness handshake, launch snapshots, and confirmed forced termination.
+- `*.test.ts`: unit, real runtime, subprocess, and real CLI regression tests.

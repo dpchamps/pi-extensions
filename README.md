@@ -18,7 +18,7 @@ The compatibility tests load every active extension through Pi. Scratchpad tests
 
 | Name | Type | Description |
 |------|------|-------------|
-| [background-command](./extensions/background-command/) | Extension (command) | `/background` — detach running task into a supervised pi RPC child; list/resume/kill/delete |
+| [background-command](./extensions/background-command/) | Extension (command) | `/background` — confirm replay of a live user request in a supervised Pi RPC child; list/resume/kill/delete |
 | [clear-command](./extensions/clear-command/) | Extension (command) | `/clear` — wipe conversation context (keeps session & costs) |
 | [file-command](./extensions/file-command/) | Extension (command) | `/file <path>` — open a file in `$VISUAL`/`$EDITOR` |
 | [pipeline-command](./extensions/pipeline-command/) | Extension (command) | `/pipeline` — execute JSON-defined pipelines of agent steps with optional model/system-prompt/script/worktree overrides |

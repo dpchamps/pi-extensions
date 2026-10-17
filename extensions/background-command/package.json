@@ -1,7 +1,7 @@
 {
   "name": "@dpchamps/pi-background-command",
   "version": "0.1.0",
-  "description": "pi extension: /background — detach a running foreground task into a supervised background pi RPC child",
+  "description": "pi extension: /background — replay a live user request in a supervised background Pi RPC child",
   "author": "dpchamps",
   "license": "MIT",
   "type": "module",

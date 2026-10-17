@@ -1,25 +1,7 @@
-/**
- * background-command extension — /background detaches the running foreground
- * task into a supervised pi --mode rpc child process so the user can keep
- * working in the foreground.
- *
- *   /background                    detach the current foreground task
- *   /background list [active|paused|killed]
- *                                  render the task tree (interactive picker → resume)
- *   /background resume <id>        stop the child, swap foreground session to it
- *   /background kill <id>          terminate the child, keep the metadata
- *   /background delete <id>        kill if alive, remove metadata + session file
- *
- * Tab-completion: subcommands first, then status filter (for list) or task IDs
- * (for resume|kill|delete). On session start: footer shows `bg: 2A 1P` when
- * any tasks are tracked.
- *
- * Children die when the parent pi exits — a session_shutdown hook stops each
- * RpcChild so no `pi --mode rpc` processes are orphaned.
- */
-
-import * as fs from "node:fs";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+/** /background replays a live user request in a supervised RPC child. */
+import * as fs from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -30,454 +12,517 @@ import {
   parseCompletionPrefix,
   STATUS_FILTERS,
   truncatePrompt,
-  type AutocompleteItem,
   type StatusFilter,
-  type TaskRef,
 } from "./completion.js";
+import { PromptTracker } from "./prompt.js";
 import {
-  BackgroundStore,
-  type BackgroundTask,
-  type TaskTreeNode,
-} from "./store.js";
-import {
-  findLastInteractiveUserMessage,
-  flushSessionToDisk,
   RpcChild,
+  forkReplaySession,
+  promptContent,
+  type BackgroundClient,
+  type RpcChildOptions,
 } from "./runner.js";
+import type { BackgroundTask, TaskTreeNode } from "./store.js";
+import { BackgroundSupervisor, sharedSupervisor } from "./supervisor.js";
 
-const CONCURRENT_WARN_AT = 5;
-const DETACH_MARKER_TYPE = "background-detach";
+export interface BackgroundOptions {
+  supervisor?: BackgroundSupervisor;
+  createClient?: (options: RpcChildOptions) => BackgroundClient;
+  /** SDK hosts can explicitly supply equivalent CLI resource/permission flags. */
+  launchArgs?: string[];
+}
 
-export default function (pi: ExtensionAPI) {
-  const store = new BackgroundStore();
-  let lastUiCtx: ExtensionContext | null = null;
+export default function background(
+  pi: ExtensionAPI,
+  options: BackgroundOptions = {},
+): void {
+  // Ordinary RPC children must not recursively expose /background. An SDK
+  // host (including isolated tests) can opt in with its own supervisor.
+  if (process.env.PI_BACKGROUND_CHILD === "1" && !options.supervisor) return;
+  const supervisor = options.supervisor ?? sharedSupervisor();
+  const store = supervisor.store;
+  const tracker = new PromptTracker();
+  const createClient =
+    options.createClient ?? ((settings) => new RpcChild(settings));
+  let unsubscribe: (() => void) | undefined;
 
-  const refreshStatus = (ctx: ExtensionContext | null = lastUiCtx): void => {
-    if (!ctx?.hasUI) return;
-    const tasks = store.all();
-    if (tasks.length === 0) {
-      ctx.ui.setStatus("background", undefined);
-      return;
-    }
-    let active = 0;
-    let paused = 0;
-    let killed = 0;
-    for (const t of tasks) {
-      const s = store.statusOf(t);
-      if (s === "active") active++;
-      else if (s === "paused") paused++;
-      else killed++;
-    }
-    const parts: string[] = [];
-    if (active) parts.push(`${active}A`);
-    if (paused) parts.push(`${paused}P`);
-    if (killed) parts.push(`${killed}K`);
+  const notify = (
+    message: string,
+    level: "info" | "warning" | "error" = "info",
+  ) => supervisor.changed({ message: `Background: ${message}`, level });
+
+  const wait = <T>(promise: Promise<T>, operation: string) =>
+    deadline(promise, operation, supervisor.operationSignal);
+
+  const refreshStatus = (ctx: ExtensionContext) => {
+    if (!ctx.hasUI) return;
+    const counts = { active: 0, paused: 0, killed: 0 };
+    for (const task of store.all()) counts[store.statusOf(task)]++;
+    const parts = [
+      counts.active && `${counts.active}A`,
+      counts.paused && `${counts.paused}P`,
+      counts.killed && `${counts.killed}K`,
+    ].filter(Boolean);
     ctx.ui.setStatus(
       "background",
-      ctx.ui.theme.fg("accent", `bg: ${parts.join(" ")}`),
+      parts.length
+        ? ctx.ui.theme.fg("accent", `bg: ${parts.join(" ")}`)
+        : undefined,
     );
   };
 
-  pi.on("session_start", async (_event, ctx: ExtensionContext) => {
-    lastUiCtx = ctx;
+  pi.on("session_start", (event, ctx) => {
+    if (event.reason === "startup")
+      supervisor.noteStartupProvider(ctx.model?.provider);
+    tracker.reset();
+    unsubscribe?.();
+    // A built-in resume of an already stopped task also completes the handoff.
+    const current = store
+      .all()
+      .find((task) =>
+        sameFile(task.sessionFile, ctx.sessionManager.getSessionFile()),
+      );
+    if (current && !current.client.isAlive()) store.archive(current.id);
+    unsubscribe = supervisor.subscribe((notice) => {
+      refreshStatus(ctx);
+      if (notice && ctx.hasUI) ctx.ui.notify(notice.message, notice.level);
+    });
     refreshStatus(ctx);
   });
-
-  pi.on("session_shutdown", async () => {
-    for (const t of store.all()) {
-      try {
-        await t.client.stop();
-      } catch {
-        // best-effort cleanup; we're shutting down anyway
-      }
+  pi.on("session_shutdown", async (event) => {
+    unsubscribe?.();
+    unsubscribe = undefined;
+    tracker.reset();
+    if (event.reason === "reload") supervisor.cancelOperation();
+    if (event.reason === "quit") await supervisor.shutdown();
+  });
+  pi.on("session_before_switch", (event) => {
+    if (
+      supervisor.busy &&
+      (!supervisor.switchTarget ||
+        !sameFile(supervisor.switchTarget, event.targetSessionFile))
+    ) {
+      notify(
+        "finish the current /background operation before switching sessions",
+        "warning",
+      );
+      return { cancel: true };
+    }
+    const target = store
+      .all()
+      .find((task) => sameFile(task.sessionFile, event.targetSessionFile));
+    if (target?.client.isAlive()) {
+      notify(
+        `use /background resume ${target.id} to stop its writer before opening that session`,
+        "warning",
+      );
+      return { cancel: true };
     }
   });
+  pi.on("session_before_fork", () => {
+    if (supervisor.busy) {
+      notify(
+        "finish the current /background operation before forking",
+        "warning",
+      );
+      return { cancel: true };
+    }
+  });
+  pi.on("input", (event) => {
+    tracker.input(event.source, event.streamingBehavior !== undefined);
+  });
+  pi.on("before_agent_start", (event) => {
+    tracker.begin(event.messageType);
+  });
+  pi.on("message_end", (event) => {
+    tracker.message(event.message);
+  });
+  pi.on("agent_settled", () => {
+    tracker.reset();
+  });
+  pi.on("session_tree", () => {
+    tracker.reset();
+  });
+
+  const requireTask = (id: string | undefined): BackgroundTask => {
+    if (!id) throw new Error("specify a task ID");
+    const task = store.get(id);
+    if (!task) throw new Error(`no task with id "${id}"`);
+    return task;
+  };
+
+  const stopTask = async (task: BackgroundTask) => {
+    // Do not update metadata or transfer ownership if termination is uncertain.
+    await task.client.stop();
+    if (task.client.isAlive())
+      throw new Error(`could not confirm ${task.id} stopped`);
+    task.killed = true;
+    task.isStreaming = false;
+    supervisor.changed();
+  };
+
+  const resume = async (
+    ctx: ExtensionCommandContext,
+    id: string | undefined,
+  ) => {
+    const task = requireTask(id);
+    if (sameFile(task.sessionFile, ctx.sessionManager.getSessionFile()))
+      throw new Error("that task is already the foreground session");
+    // Never stop the child and then wait indefinitely for unrelated foreground work.
+    if (!ctx.isIdle()) {
+      if (
+        !ctx.hasUI ||
+        !(await wait(
+          ctx.ui.confirm(
+            "Resume background task?",
+            "Abort the current foreground run and open the background session?",
+            { signal: supervisor.operationSignal, timeout: 30_000 },
+          ),
+          "resume confirmation",
+        ))
+      )
+        return;
+      ctx.abort();
+      await wait(ctx.waitForIdle(), "foreground cancellation");
+    }
+    try {
+      await fs.access(task.sessionFile);
+    } catch {
+      throw new Error(
+        `${task.id}'s session file is missing; its registry entry was retained`,
+      );
+    }
+    await stopTask(task);
+    supervisor.operationSignal?.throwIfAborted();
+    supervisor.switchTarget = task.sessionFile;
+    try {
+      const result = await ctx.switchSession(task.sessionFile, {
+        withSession: async (replacement) => {
+          store.archive(task.id);
+          supervisor.changed();
+          // Only the fresh replacement context is used after a successful switch.
+          replacement.ui.notify(`Background: resumed ${task.id}`, "info");
+        },
+      });
+      if (result.cancelled)
+        notify(
+          `switch to ${task.id} cancelled; its child is stopped and its session is preserved. Retry /background resume ${task.id}.`,
+          "warning",
+        );
+    } catch (error) {
+      throw new Error(
+        `switch to ${task.id} failed: ${String(error)}. Its child is stopped and its session is preserved.`,
+      );
+    } finally {
+      supervisor.switchTarget = undefined;
+    }
+  };
+
+  const detach = async (ctx: ExtensionCommandContext) => {
+    if (!ctx.hasUI)
+      throw new Error("detach requires a UI for replay confirmation");
+    const eligible = () => {
+      if (ctx.isIdle() || ctx.hasPendingMessages()) return undefined;
+      return tracker.current(ctx.sessionManager);
+    };
+    const request = eligible();
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    if (!sessionFile || !request)
+      throw new Error(
+        "no unambiguous live user request to replay. Idle, queued, extension-started (including /task), and restored runs cannot be detached.",
+      );
+    if (store.wasDetached(sessionFile, request.id))
+      throw new Error("that request was already detached");
+    const { text, images } = promptContent(request);
+    if (!text.trim() && !images.length)
+      throw new Error("request has no replayable content");
+    const launchArgs = [
+      ...(options.launchArgs ?? supervisor.launchArgs(ctx.model?.provider)),
+    ];
+    launchArgs.push(ctx.isProjectTrusted() ? "--approve" : "--no-approve");
+    if (ctx.model)
+      launchArgs.push(
+        "--provider",
+        ctx.model.provider,
+        "--model",
+        ctx.model.id,
+      );
+    if (ctx.thinkingLevel) launchArgs.push("--thinking", ctx.thinkingLevel);
+    const snapshot = {
+      systemPrompt: ctx.getSystemPrompt(),
+      tools: [...pi.getActiveTools()],
+    };
+    const preview = truncatePrompt(text || "[image-only request]", 100);
+    if (
+      !(await wait(
+        ctx.ui.confirm(
+          "Replay request in background?",
+          `${preview}\n\nThis aborts and replays the request, not the running tools or extension state. Completed side effects can repeat. The child shares this workspace; concurrent edits can conflict. Continue?`,
+          { signal: supervisor.operationSignal, timeout: 30_000 },
+        ),
+        "replay confirmation",
+      ))
+    )
+      return;
+    if (eligible()?.id !== request.id)
+      throw new Error(
+        "the run changed or completed while confirming; nothing was detached",
+      );
+    if (store.all().filter((task) => task.client.isAlive()).length >= 5)
+      notify(
+        "5 or more children are running; concurrent processes and workspace edits add up",
+        "warning",
+      );
+    ctx.abort();
+    await wait(ctx.waitForIdle(), "foreground cancellation");
+    const latestUser = [...ctx.sessionManager.getBranch()]
+      .reverse()
+      .find(
+        (entry) => entry.type === "message" && entry.message.role === "user",
+      );
+    if (
+      latestUser?.id !== request.id ||
+      !ctx.isIdle() ||
+      ctx.hasPendingMessages()
+    )
+      throw new Error(
+        "foreground input changed during cancellation; no child was started",
+      );
+
+    const forkedPath = await forkReplaySession(
+      ctx.sessionManager,
+      request,
+      ctx.cwd,
+    );
+    supervisor.operationSignal?.throwIfAborted();
+    const id = store.allocId();
+    const observer = supervisor.observe(id);
+    const client = createClient({
+      cwd: ctx.cwd,
+      sessionFile: forkedPath,
+      args: launchArgs,
+      snapshot,
+      expectedModel: ctx.model
+        ? { provider: ctx.model.provider, id: ctx.model.id }
+        : undefined,
+      ...observer.handlers,
+    });
+    const task: BackgroundTask = {
+      id,
+      client,
+      sessionFile: forkedPath,
+      parentSessionFile: sessionFile,
+      sourceEntryId: request.id,
+      cwd: ctx.cwd,
+      firstPrompt: text || "[image-only request]",
+      startedAt: new Date(),
+      killed: false,
+      isStreaming: true,
+    };
+    // Track before spawning, including failures whose cleanup might need retrying.
+    supervisor.register(task);
+    try {
+      await wait(client.start(), "child readiness");
+      const disposition = await wait(
+        client.prompt(text, images),
+        "child prompt acceptance",
+      );
+      if (disposition === "handled" && !observer.started)
+        task.isStreaming = false;
+      if (!client.isAlive()) throw new Error("child exited during handoff");
+    } catch (error) {
+      task.error = String(error).slice(0, 16_384);
+      try {
+        await stopTask(task);
+      } catch (stopError) {
+        task.error += `; cleanup: ${String(stopError).slice(0, 2000)}`;
+      }
+      notify(
+        `${id} failed: ${task.error}. The original request was stopped; both session files are preserved.`,
+        "error",
+      );
+      supervisor.changed();
+      return;
+    }
+    pi.sendMessage(
+      {
+        customType: "background-detach",
+        content: `[Replayed previous request as ${id} in the same workspace. Completed side effects may repeat. /background resume ${id} to open its session.]`,
+        display: true,
+      },
+      { triggerTurn: false },
+    );
+    supervisor.changed();
+    notify(
+      `replaying as ${id}. /background list to see tasks; /background resume ${id} to open it.`,
+    );
+  };
+
+  const list = async (ctx: ExtensionCommandContext, filter?: StatusFilter) => {
+    const tree = store.tree(
+      filter ? (task) => store.statusOf(task) === filter : undefined,
+    );
+    if (!tree.length) {
+      notify(filter ? `no ${filter} tasks` : "no tasks tracked");
+      return;
+    }
+    if (!ctx.hasUI) throw new Error("list requires an interactive or RPC UI");
+    const lines: string[] = [];
+    const ids = new Map<string, string>();
+    const render = (
+      node: TaskTreeNode,
+      prefix: string,
+      last: boolean,
+      root: boolean,
+    ) => {
+      const task = node.task;
+      const status = node.archived ? "resumed ancestor" : store.statusOf(task);
+      const elapsed = formatElapsed(Date.now() - task.startedAt.getTime());
+      const line = `${prefix}${root ? "" : last ? "└─ " : "├─ "}${task.id} [${status}] ${truncatePrompt(task.firstPrompt, 50)} (${elapsed})${task.error ? ` — ${truncatePrompt(task.error, 80)}` : ""}`;
+      lines.push(line);
+      if (!node.archived) ids.set(line, task.id);
+      node.children.forEach((child, index) =>
+        render(
+          child,
+          prefix + (root ? "" : last ? "   " : "│  "),
+          index === node.children.length - 1,
+          false,
+        ),
+      );
+    };
+    tree.forEach((node, index) =>
+      render(node, "", index === tree.length - 1, true),
+    );
+    const selected = await wait(
+      ctx.ui.select(
+        "Resume background task (ancestor rows are context only)",
+        lines,
+        { signal: supervisor.operationSignal, timeout: 30_000 },
+      ),
+      "task selection",
+    );
+    if (selected && ids.has(selected)) await resume(ctx, ids.get(selected));
+  };
 
   pi.registerCommand("background", {
     description:
-      "Detach the running foreground task into a background pi RPC child. Subcommands: list|resume|kill|delete",
-    getArgumentCompletions: async (prefix) =>
-      getBackgroundCompletions(store, prefix),
+      "Replay a live user request in a supervised background child. Subcommands: list|resume|kill|delete",
+    getArgumentCompletions: (prefix) => {
+      const parsed = parseCompletionPrefix(prefix);
+      const tasks = store
+        .all()
+        .filter(
+          (task) =>
+            parsed.stage !== "arg" ||
+            parsed.sub !== "kill" ||
+            task.client.isAlive(),
+        );
+      return buildCompletionItems(
+        parsed,
+        tasks.map((task) => ({
+          id: task.id,
+          status: store.statusOf(task),
+          promptPreview: truncatePrompt(task.firstPrompt, 50),
+        })),
+      );
+    },
     handler: async (args, ctx) => {
-      lastUiCtx = ctx;
-      const tokens = args.trim().split(/\s+/).filter(Boolean);
-      const sub = tokens[0];
-
-      if (!sub) {
-        await runDetach(pi, ctx, store, refreshStatus);
-        return;
-      }
-      if (sub === "list") {
-        await runList(ctx, store, parseStatusFilter(tokens[1]), refreshStatus);
-        return;
-      }
-      if (sub === "resume") {
-        await runResume(ctx, store, tokens[1], refreshStatus);
-        return;
-      }
-      if (sub === "kill") {
-        await runKill(ctx, store, tokens[1], refreshStatus);
-        return;
-      }
-      if (sub === "delete") {
-        await runDelete(ctx, store, tokens[1], refreshStatus);
-        return;
-      }
-
-      ctx.ui.notify(
-        `Background: unknown subcommand "${sub}". Usage: /background [list|resume|kill|delete]`,
-        "warning",
-      );
-    },
-  });
-}
-
-function parseStatusFilter(token: string | undefined): StatusFilter | undefined {
-  if (!token) return undefined;
-  return (STATUS_FILTERS as readonly string[]).includes(token)
-    ? (token as StatusFilter)
-    : undefined;
-}
-
-function buildTaskRefs(store: BackgroundStore): TaskRef[] {
-  return store.all().map((t) => ({
-    id: t.id,
-    status: store.statusOf(t),
-    promptPreview: truncatePrompt(t.firstPrompt, 50),
-  }));
-}
-
-function getBackgroundCompletions(
-  store: BackgroundStore,
-  prefix: string,
-): AutocompleteItem[] {
-  const parsed = parseCompletionPrefix(prefix);
-  if (parsed.stage === "sub") return buildCompletionItems(parsed, []);
-
-  const sub = parsed.sub;
-  let refs = buildTaskRefs(store);
-  // resume/kill only make sense for alive tasks; delete works on anything.
-  if (sub === "resume" || sub === "kill") {
-    refs = refs.filter((r) => r.status !== "killed");
-  }
-  return buildCompletionItems(parsed, refs);
-}
-
-async function runDetach(
-  pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-  store: BackgroundStore,
-  refreshStatus: () => void,
-): Promise<void> {
-  const sessionFile = ctx.sessionManager.getSessionFile();
-  if (!sessionFile) {
-    ctx.ui.notify(
-      "Background: no foreground session file — nothing to detach",
-      "warning",
-    );
-    return;
-  }
-
-  const entries = ctx.sessionManager.getEntries();
-  const found = findLastInteractiveUserMessage(entries);
-  if (!found) {
-    ctx.ui.notify(
-      "Background: no interactive user message to hand off — send a prompt first",
-      "info",
-    );
-    return;
-  }
-
-  const aliveCount = store
-    .all()
-    .filter((t) => store.statusOf(t) !== "killed").length;
-  if (aliveCount >= CONCURRENT_WARN_AT) {
-    ctx.ui.notify(
-      `Background: ${aliveCount} background tasks running — child pi processes add up`,
-      "warning",
-    );
-  }
-
-  // Stop the in-flight foreground stream so the abort propagates to disk
-  // before we fork. The user message + any partial assistant entry remain in
-  // the parent session.
-  ctx.abort();
-  await ctx.waitForIdle();
-
-  const flushErr = await flushSessionToDisk(ctx, sessionFile);
-  if (flushErr) {
-    ctx.ui.notify(`Background: ${flushErr}`, "error");
-    return;
-  }
-
-  let forkedPath: string;
-  try {
-    const forked = SessionManager.forkFrom(sessionFile, ctx.cwd);
-    // Rewind the fork so the child re-issues the user message cleanly
-    // instead of inheriting the parent's already-asked state.
-    if (found.entry.parentId) {
-      forked.branch(found.entry.parentId);
-    } else {
-      forked.resetLeaf();
-    }
-    const fp = forked.getSessionFile();
-    if (!fp) throw new Error("forked session has no file path");
-    forkedPath = fp;
-  } catch (e) {
-    ctx.ui.notify(
-      `Background: session fork failed: ${(e as Error).message}`,
-      "error",
-    );
-    return;
-  }
-
-  const id = store.allocId();
-  const client = new RpcChild({
-    cwd: ctx.cwd,
-    sessionFile: forkedPath,
-    onEvent: (ev) => {
-      if (ev.type === "agent_start") {
-        const task = store.get(id);
-        if (task) {
-          task.isStreaming = true;
-          refreshStatus();
-        }
-      } else if (ev.type === "agent_end") {
-        const task = store.get(id);
-        if (task) {
-          task.isStreaming = false;
-          refreshStatus();
-        }
+      // Let Pi's command error channel report this in print/JSON modes; a
+      // notify-only error would silently disappear without a UI subscriber.
+      if (!ctx.hasUI)
+        throw new Error("/background requires an interactive or RPC UI");
+      try {
+        await supervisor.exclusive(async () => {
+          const tokens = args.trim().split(/\s+/).filter(Boolean);
+          if (!tokens.length) {
+            await detach(ctx);
+            return;
+          }
+          if (tokens.length > 2)
+            throw new Error(
+              "usage /background [list [active|paused|killed]|resume <id>|kill <id>|delete <id>]",
+            );
+          const [sub, id] = tokens;
+          if (sub === "list") {
+            if (id && !(STATUS_FILTERS as readonly string[]).includes(id))
+              throw new Error(`unknown status "${id}"`);
+            await list(ctx, id as StatusFilter | undefined);
+          } else if (sub === "resume") await resume(ctx, id);
+          else if (sub === "kill" || sub === "delete") {
+            const task = requireTask(id);
+            if (sameFile(task.sessionFile, ctx.sessionManager.getSessionFile()))
+              throw new Error("cannot kill or delete the foreground session");
+            await stopTask(task);
+            if (sub === "delete") {
+              // Unlink failures keep the registry entry, permitting a retry.
+              await fs.rm(task.sessionFile, { force: true });
+              store.remove(task.id);
+            }
+            notify(`${sub === "kill" ? "stopped" : "deleted"} ${task.id}`);
+          } else
+            throw new Error(
+              `unknown subcommand "${sub}". Use /background [list|resume|kill|delete]`,
+            );
+          supervisor.changed();
+        });
+      } catch (error) {
+        // No old ctx/pi access here: replacement may have succeeded before a
+        // different extension's withSession/rebind callback failed.
+        notify(error instanceof Error ? error.message : String(error), "error");
       }
     },
   });
-
-  try {
-    await client.start();
-  } catch (e) {
-    ctx.ui.notify(
-      `Background: failed to spawn pi rpc child: ${(e as Error).message}`,
-      "error",
-    );
-    return;
-  }
-
-  const task: BackgroundTask = {
-    id,
-    client,
-    sessionFile: forkedPath,
-    parentSessionFile: sessionFile,
-    cwd: ctx.cwd,
-    firstPrompt: found.text,
-    startedAt: new Date(),
-    killed: false,
-    isStreaming: true,
-  };
-  store.register(task);
-
-  // Re-issue the user prompt to the child. Fire-and-forget; we listen via
-  // onEvent for status changes.
-  client.prompt(found.text);
-
-  // Drop a visible marker into the parent transcript so the LLM (and the user)
-  // can see what was handed off. CustomMessageEntry with display:true renders
-  // distinctly and is folded into LLM context as a user message — gives the
-  // model context that the prior question was moved.
-  pi.sendMessage({
-    customType: DETACH_MARKER_TYPE,
-    content: `[Detached previous request as ${id}. Use /background resume ${id} to take it back, /background list to see all.]`,
-    display: true,
-  });
-
-  refreshStatus();
-  ctx.ui.notify(
-    `Background: detached as ${id}. /background list to see, /background resume ${id} to take it back.`,
-    "info",
-  );
 }
 
-async function runList(
-  ctx: ExtensionCommandContext,
-  store: BackgroundStore,
-  filter: StatusFilter | undefined,
-  refreshStatus: () => void,
-): Promise<void> {
-  const filterFn = filter
-    ? (t: BackgroundTask) => store.statusOf(t) === filter
-    : undefined;
-  const tree = store.tree(filterFn);
-
-  if (tree.length === 0) {
-    ctx.ui.notify(
-      filter
-        ? `Background: no ${filter} tasks`
-        : "Background: no tasks tracked",
-      "info",
-    );
-    return;
+function sameFile(left: string, right?: string): boolean {
+  if (right === undefined) return false;
+  if (resolve(left) === resolve(right)) return true;
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return false;
   }
-
-  const lines: string[] = [];
-  const idByLine = new Map<string, string>();
-  const render = (node: TaskTreeNode, depth: number, isLast: boolean): void => {
-    const indent = depth === 0 ? "" : `${"   ".repeat(depth - 1)}${isLast ? "└─ " : "├─ "}`;
-    const status = store.statusOf(node.task);
-    const elapsed = formatElapsed(Date.now() - node.task.startedAt.getTime());
-    const line = `${indent}${node.task.id}  [${status}]  ${truncatePrompt(node.task.firstPrompt, 50)}  (${elapsed})`;
-    lines.push(line);
-    idByLine.set(line, node.task.id);
-    node.children.forEach((c, i) =>
-      render(c, depth + 1, i === node.children.length - 1),
-    );
-  };
-  tree.forEach((root, i) => render(root, 0, i === tree.length - 1));
-
-  const picked = await ctx.ui.select("Resume background task", lines);
-  if (!picked) return;
-  const id = idByLine.get(picked);
-  if (!id) return;
-  await runResume(ctx, store, id, refreshStatus);
 }
 
-async function runResume(
-  ctx: ExtensionCommandContext,
-  store: BackgroundStore,
-  id: string | undefined,
-  refreshStatus: () => void,
-): Promise<void> {
-  if (!id) {
-    ctx.ui.notify("Background: usage /background resume <id>", "warning");
-    return;
-  }
-  const task = store.get(id);
-  if (!task) {
-    ctx.ui.notify(`Background: no task with id "${id}"`, "warning");
-    return;
-  }
-
-  // Stop the child first — two processes can't safely write the same JSONL.
+async function deadline<T>(
+  promise: Promise<T>,
+  operation: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
   try {
-    await task.client.stop();
-  } catch (e) {
-    ctx.ui.notify(
-      `Background: failed to stop ${id} cleanly: ${(e as Error).message}`,
-      "warning",
-    );
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        abort = () =>
+          reject(new Error("operation cancelled by session shutdown/reload"));
+        if (signal?.aborted) abort();
+        else signal?.addEventListener("abort", abort, { once: true });
+      }),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Timed out waiting for ${operation}; no session ownership was transferred`,
+              ),
+            ),
+          30_000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    if (abort) signal?.removeEventListener("abort", abort);
   }
-  await ctx.waitForIdle();
-
-  if (!fs.existsSync(task.sessionFile)) {
-    ctx.ui.notify(
-      `Background: ${id}'s session file is gone — removing from registry`,
-      "warning",
-    );
-    store.remove(id);
-    refreshStatus();
-    return;
-  }
-
-  try {
-    const result = await ctx.switchSession(task.sessionFile);
-    if (result.cancelled) {
-      ctx.ui.notify(`Background: switch to ${id} cancelled`, "warning");
-      return;
-    }
-  } catch (e) {
-    ctx.ui.notify(
-      `Background: failed to switch to ${id}: ${(e as Error).message}`,
-      "error",
-    );
-    return;
-  }
-
-  store.remove(id);
-  refreshStatus();
-  ctx.ui.notify(`Background: resumed ${id}`, "info");
-}
-
-async function runKill(
-  ctx: ExtensionCommandContext,
-  store: BackgroundStore,
-  id: string | undefined,
-  refreshStatus: () => void,
-): Promise<void> {
-  if (!id) {
-    ctx.ui.notify("Background: usage /background kill <id>", "warning");
-    return;
-  }
-  const task = store.get(id);
-  if (!task) {
-    ctx.ui.notify(`Background: no task with id "${id}"`, "warning");
-    return;
-  }
-  if (task.killed) {
-    ctx.ui.notify(`Background: ${id} is already killed`, "info");
-    return;
-  }
-
-  try {
-    task.client.abort();
-    await task.client.stop();
-  } catch (e) {
-    ctx.ui.notify(
-      `Background: kill ${id} hit an error: ${(e as Error).message}`,
-      "warning",
-    );
-  }
-  task.killed = true;
-  task.isStreaming = false;
-  refreshStatus();
-  ctx.ui.notify(`Background: killed ${id}`, "info");
-}
-
-async function runDelete(
-  ctx: ExtensionCommandContext,
-  store: BackgroundStore,
-  id: string | undefined,
-  refreshStatus: () => void,
-): Promise<void> {
-  if (!id) {
-    ctx.ui.notify("Background: usage /background delete <id>", "warning");
-    return;
-  }
-  const task = store.get(id);
-  if (!task) {
-    ctx.ui.notify(`Background: no task with id "${id}"`, "warning");
-    return;
-  }
-
-  if (!task.killed) {
-    try {
-      task.client.abort();
-      await task.client.stop();
-    } catch {
-      // best-effort
-    }
-  }
-
-  if (fs.existsSync(task.sessionFile)) {
-    try {
-      await fs.promises.unlink(task.sessionFile);
-    } catch (e) {
-      ctx.ui.notify(
-        `Background: removed ${id} but session file unlink failed: ${(e as Error).message}`,
-        "warning",
-      );
-    }
-  }
-
-  store.remove(id);
-  refreshStatus();
-  ctx.ui.notify(`Background: deleted ${id}`, "info");
 }
 
 function formatElapsed(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
 }

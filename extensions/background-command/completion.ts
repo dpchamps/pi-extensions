@@ -50,9 +50,9 @@ export function parseCompletionPrefix(prefix: string): CompletionParse {
  *   keeps tab-completing).
  * - Argument stage: value = `<sub> <arg>` (full replacement).
  *
- * `tasks` is passed in pre-resolved so this function stays pure. For `resume`
- * and `kill`, callers should filter to alive tasks (status !== "killed").
- * For `delete`, all tasks are valid.
+ * `tasks` is passed in pre-resolved so this function stays pure. Only `kill`
+ * filters to alive tasks. Resume can open preserved sessions of dead tasks;
+ * delete also accepts every tracked task.
  */
 export function buildCompletionItems(
   parsed: CompletionParse,

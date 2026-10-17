@@ -1,105 +1,114 @@
-/**
- * In-memory registry of background tasks scoped to the lifetime of the parent
- * pi process. The store is intentionally passive — it holds task records and
- * answers queries; the runner owns the side-effecting child-process work.
- *
- * Tasks form a tree by their parentSessionFile: a top-level task's parent is
- * the foreground session at the time it was detached, and a task detached
- * while inside a resumed bg task chains under it.
- */
-
+/** Passive process-lifetime task registry, with historical nodes for lineage. */
 import type { TaskStatus } from "./completion.js";
-import type { RpcChild } from "./runner.js";
+import type { BackgroundClient } from "./runner.js";
 
 export interface BackgroundTask {
   id: string;
-  client: RpcChild;
-  /** The forked session file this task's child writes to. */
+  client: BackgroundClient;
   sessionFile: string;
-  /** The session file the task was forked from (used for tree assembly). */
   parentSessionFile: string;
+  sourceEntryId: string;
   cwd: string;
-  /** First user prompt sent to the child — used in list rendering. */
   firstPrompt: string;
   startedAt: Date;
-  /** Sticky once stop()/abort() has been issued. */
   killed: boolean;
-  /** Cached from rpc events: true while a stream is in flight. */
   isStreaming: boolean;
+  error?: string;
 }
 
 export interface TaskTreeNode {
   task: BackgroundTask;
+  /** A resumed ancestor, included only to give its tracked descendants context. */
+  archived: boolean;
   children: TaskTreeNode[];
 }
 
 export class BackgroundStore {
   private readonly tasks = new Map<string, BackgroundTask>();
+  private readonly history = new Map<string, BackgroundTask>();
   private nextId = 1;
 
   allocId(): string {
     return `bg-${this.nextId++}`;
   }
-
   register(task: BackgroundTask): void {
     this.tasks.set(task.id, task);
   }
-
   get(id: string): BackgroundTask | undefined {
     return this.tasks.get(id);
   }
-
+  all(): BackgroundTask[] {
+    return [...this.tasks.values()];
+  }
   remove(id: string): boolean {
     return this.tasks.delete(id);
   }
 
-  all(): BackgroundTask[] {
-    return [...this.tasks.values()];
+  archive(id: string): void {
+    const task = this.tasks.get(id);
+    if (!task) return;
+    this.history.set(task.sessionFile, task);
+    this.tasks.delete(id);
   }
 
-  /** Status is derived; we never store it on the record. */
+  wasDetached(sessionFile: string, entryId: string): boolean {
+    return [...this.tasks.values(), ...this.history.values()].some(
+      (task) =>
+        task.parentSessionFile === sessionFile &&
+        task.sourceEntryId === entryId,
+    );
+  }
+
   statusOf(task: BackgroundTask): TaskStatus {
-    if (task.killed) return "killed";
+    if (task.killed || !task.client.isAlive()) return "killed";
     return task.isStreaming ? "active" : "paused";
   }
 
-  filterByStatus(status: TaskStatus | undefined): BackgroundTask[] {
-    if (!status) return this.all();
-    return this.all().filter((t) => this.statusOf(t) === status);
-  }
-
-  /**
-   * Assemble a tree by parentSessionFile. Roots are tasks whose parent session
-   * isn't itself a tracked task's sessionFile — i.e. they were detached from
-   * the foreground proper (or from a session we no longer track).
-   *
-   * The tree is sorted: roots by ascending startedAt, children likewise.
-   */
-  tree(filter?: (t: BackgroundTask) => boolean): TaskTreeNode[] {
-    const tasks = filter ? this.all().filter(filter) : this.all();
-    const bySessionFile = new Map<string, BackgroundTask>();
-    for (const t of tasks) bySessionFile.set(t.sessionFile, t);
-
+  tree(filter?: (task: BackgroundTask) => boolean): TaskTreeNode[] {
+    const selected = this.all().filter(filter ?? (() => true));
+    const bySession = new Map([
+      ...this.history,
+      ...this.all().map((task) => [task.sessionFile, task] as const),
+    ]);
     const nodes = new Map<string, TaskTreeNode>();
-    for (const t of tasks) nodes.set(t.id, { task: t, children: [] });
-
-    const roots: TaskTreeNode[] = [];
-    for (const t of tasks) {
-      const parentTask = bySessionFile.get(t.parentSessionFile);
-      const node = nodes.get(t.id);
-      if (!node) continue;
-      if (parentTask && parentTask.id !== t.id) {
-        nodes.get(parentTask.id)?.children.push(node);
-      } else {
-        roots.push(node);
-      }
-    }
-
-    const sortNodes = (arr: TaskTreeNode[]) => {
-      arr.sort((a, b) => a.task.startedAt.getTime() - b.task.startedAt.getTime());
-      for (const n of arr) sortNodes(n.children);
+    const add = (task: BackgroundTask, seen = new Set<string>()): void => {
+      if (seen.has(task.id) || nodes.has(task.id)) return;
+      seen.add(task.id);
+      nodes.set(task.id, {
+        task,
+        archived: !this.tasks.has(task.id),
+        children: [],
+      });
+      const parent = bySession.get(task.parentSessionFile);
+      if (parent) add(parent, seen);
     };
-    sortNodes(roots);
+    for (const task of selected) add(task);
+    const roots: TaskTreeNode[] = [];
+    for (const node of nodes.values()) {
+      const parent = bySession.get(node.task.parentSessionFile);
+      const parentNode = parent && nodes.get(parent.id);
+      // Session forks are acyclic; be defensive about malformed injected data.
+      const ancestors = new Set([node.task.sessionFile]);
+      let cursor = parent;
+      let cycle = false;
+      while (cursor) {
+        if (ancestors.has(cursor.sessionFile)) {
+          cycle = true;
+          break;
+        }
+        ancestors.add(cursor.sessionFile);
+        cursor = bySession.get(cursor.parentSessionFile);
+      }
+      if (parentNode && !cycle) parentNode.children.push(node);
+      else roots.push(node);
+    }
+    const sort = (items: TaskTreeNode[]) => {
+      items.sort(
+        (a, b) => a.task.startedAt.getTime() - b.task.startedAt.getTime(),
+      );
+      for (const node of items) sort(node.children);
+    };
+    sort(roots);
     return roots;
   }
 }
