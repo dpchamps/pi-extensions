@@ -23,6 +23,7 @@ const activeExtensions = [
   "file-command",
   "pipeline-command",
   "runinfra",
+  "scratchpad",
   "task",
   "web-fetch-tool",
   "worktree-command",
@@ -94,9 +95,8 @@ describe("Pi compatibility", () => {
           });
           pi.on("before_agent_start", (event) => {
             starts += 1;
-            // A prospective scratchpad section, not the scratchpad implementation.
-            event.systemPromptOptions.sections.scratchpad =
-              "Use the session scratchpad for disposable calculations.";
+            event.systemPromptOptions.sections.compatibility_guidance =
+              "Stable guidance for the compatibility test.";
           });
           pi.on("turn_start", () => {
             turns += 1;
@@ -129,7 +129,8 @@ describe("Pi compatibility", () => {
       expect(errors).toEqual([]);
 
       const declarations = session.messages.filter(
-        (message) => message.role === "system" && message.sections?.scratchpad,
+        (message) =>
+          message.role === "system" && message.sections?.compatibility_guidance,
       );
       expect(declarations).toHaveLength(1);
     } finally {

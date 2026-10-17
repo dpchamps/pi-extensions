@@ -1,0 +1,11 @@
+{
+  "name": "@dpchamps/pi-scratchpad",
+  "version": "0.1.0",
+  "description": "pi extension: a session-scoped temporary scratchpad with context-invariant guidance",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

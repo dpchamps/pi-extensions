@@ -12,7 +12,7 @@ npm run typecheck
 npm test
 ```
 
-The compatibility tests load every active extension through Pi and verify that `before_agent_start` runs once per agent run, while unchanged named prompt sections are not appended again.
+The compatibility tests load every active extension through Pi. Scratchpad tests cover native compaction, generic context projections, reload/resume, and repair deduplication. The reusable [`ensureContext`](./lib/ensure-context.ts) helper checks outgoing context and repairs missing guidance without adding per-prompt reminders.
 
 ## Contents
 
@@ -22,6 +22,7 @@ The compatibility tests load every active extension through Pi and verify that `
 | [clear-command](./extensions/clear-command/) | Extension (command) | `/clear` — wipe conversation context (keeps session & costs) |
 | [file-command](./extensions/file-command/) | Extension (command) | `/file <path>` — open a file in `$VISUAL`/`$EDITOR` |
 | [pipeline-command](./extensions/pipeline-command/) | Extension (command) | `/pipeline` — execute JSON-defined pipelines of agent steps with optional model/system-prompt/script/worktree overrides |
+| [scratchpad](./extensions/scratchpad/) | Extension | Session-scoped temporary files; restores guidance only when missing from outgoing context |
 | [task](./extensions/task/) | Extension (command) | `/task` — run a task until a verification command succeeds (loop with nudges, cap, abort-on-input) |
 | [web-fetch-tool](./extensions/web-fetch-tool/) | Extension (tool) | Fetch URLs and extract structured content from webpages and supported domains |
 | [worktree-command](./extensions/worktree-command/) | Extension (command) | `/worktree` — fork branch into `.worktrees/`, switch/merge/cleanup, with autocomplete |
