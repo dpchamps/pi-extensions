@@ -24,6 +24,7 @@ const activeExtensions = [
   "pipeline-command",
   "runinfra",
   "scratchpad",
+  "shell-command",
   "task",
   "web-fetch-tool",
   "worktree-command",

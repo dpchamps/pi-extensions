@@ -1,0 +1,11 @@
+{
+  "name": "@dpchamps/pi-shell-command",
+  "version": "0.1.0",
+  "description": "pi extension: /shell — borrow the terminal for a fresh interactive shell",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
