@@ -1,64 +1,90 @@
 # task
 
-Adds `/task` — an autonomous loop: the agent works on a prompt, a verification command runs, and if it fails the agent is nudged to keep going, until the verification passes (or the run cap is hit).
+Adds `/task` with three autonomous task loops: **oracle**, **focus**, and **goal**.
 
 ## Usage
 
+```text
+/task --verify "<command>" <prompt>                    # oracle (default)
+/task --focus [--limit <runs>] <prompt>
+/task --goal <prompt>
 ```
-/task <prompt> || <verify-script> [|| <cap>]
-```
+
+The canonical type flag is `--type oracle|focus|goal`. The convenience flags `--oracle`, `--focus`, and `--goal` are equivalent. `--kind` is accepted as an alias for `--type`.
+
+Flag values containing spaces must be quoted. Use `--` before a prompt that begins with a flag-like token.
 
 Examples:
 
-```
-/task fix the failing tests || npm test
-/task make typecheck pass || npx tsc --noEmit
-/task make the e2e cart suite green || pnpm test:e2e --grep cart || 15
-```
-
-The prompt and verify script are split on `||` (surrounding whitespace is ignored), so spaces are fine — no quoting needed. The optional cap defaults to **10 runs**. The verify script must not itself contain `||` (use a wrapper script if it does).
-
-## What It Does
-
-```
-send prompt to agent
-loop when the agent settles:
-  run bash -c <verify-script> in the session cwd
-  exit 0        → done
-  exit != 0     → nudge the agent with the failing output, continue
-  cap reached   → stop (warning)
-  timeout       → stop (error)
+```text
+/task --verify "npm test" fix the failing tests
+/task --type oracle --verify "npx tsc --noEmit" make typecheck pass
+/task --focus investigate several substantially different caching designs
+/task --focus --limit 8 find a simpler implementation
+/task --goal implement the cart feature and verify it end to end
 ```
 
-The loop is event-driven: it hooks the `agent_settled` event, which fires only when the agent has fully settled (no automatic retry, compaction, or queued continuation will run) — so verification never happens mid-flight.
+Send any interactive message while a task is active to stop its loop. The message is still delivered normally.
 
-On failures the agent gets a short nudge — not a restated prompt — since the task is already in context:
+## Oracle (default)
 
+An independent command decides whether the task is complete:
+
+```text
+send the original prompt
+when the agent settles:
+  run bash -c <verify-command>
+  exit 0     → complete
+  non-zero   → send the original prompt again
 ```
-The verification command `npm test` is still failing (exit 1). Latest output:
 
-```
-…
-```
+Oracle tasks require `--verify`. They do not have a run limit; they continue until verification passes, verification times out, or the user stops them.
 
-Keep working on the task until the verification passes.
-```
+Unlike the previous implementation, failing command output is **not** sent to the agent. The exact initial prompt is repeated instead.
 
-## Stopping
+The verifier runs in the session cwd and times out after 10 minutes. Stopping the task aborts an in-progress verifier.
 
-Send any message while a task is running. The message is delivered to the agent normally, and the loop stops (no further verification or nudges).
+## Focus
+
+Focus mode keeps the agent working after it tries to finish. Each continuation repeats the original prompt and appends:
+
+> The current run is not exhausted. Be creative and try different approaches. Use any context-management tools available to you. Continue working instead of returning a final answer.
+
+Focus has no automatic completion test. It runs until stopped, or until its optional `--limit` number of agent runs is reached. `--limit` is valid only for focus tasks.
+
+Before sending a continuation, focus checks current context usage. At **60% or more**, it compacts first with instructions to preserve the task, attempts, findings, failures, modified files, and promising next experiments.
+
+## Goal
+
+Goal mode uses an independent evaluator running in a separate Pi process with the **same model and thinking level**.
+
+Before implementation starts, the evaluator:
+
+1. Inspects the starting workspace.
+2. Creates a private temporary Markdown checklist with concrete acceptance criteria.
+3. Adds a direct verification method to every checklist item.
+
+Whenever the main agent settles, a fresh evaluator run reads that checklist and inspects the live workspace. It is explicitly instructed to:
+
+- verify with files, diffs, tests, typechecks, and focused commands;
+- distrust claims, summaries, and pre-checked boxes without reproducing evidence;
+- update the checklist with evidence and remaining gaps;
+- never implement fixes or modify project files;
+- report complete only when every criterion is independently verified.
+
+The implementing agent does not receive or author the checklist. If the goal is incomplete, it receives the original prompt plus the evaluator's concise, evidence-based gaps. The evaluator's scratchpad is removed when the task ends.
+
+Goal evaluators inherit the host's resource and security restrictions, project-trust decision, active model, and thinking level. Each evaluator run has a 10-minute timeout.
 
 ## Status
 
-The footer `task` slot shows the current state:
-- `↻ task N/cap` — agent is working on run N
-- `↻ task verifying (N/cap)` — verification script is running
+The footer's `task` slot shows the active type and phase, for example:
 
-Cleared when the task ends, is stopped, or the session shuts down.
+- `↻ task oracle 2`
+- `↻ task oracle verifying (2)`
+- `↻ task focus 3/8`
+- `↻ task focus compacting (64%)`
+- `↻ task goal planning`
+- `↻ task goal checking (2)`
 
-## Notes
-
-- Verification output is truncated to the last 8000 chars before being fed back (test summaries live at the end, so the tail is kept).
-- Verification times out after 10 minutes; a timed-out run stops the task with an error.
-- One task loop per session. A second `/task` is rejected until the first ends or is stopped.
-- The verify script runs in `ctx.cwd` (the session's working directory).
+Only one task can be active in a session at a time.

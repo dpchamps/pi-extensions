@@ -1,142 +1,327 @@
 /**
- * task extension — /task command that runs an autonomous loop:
- * do the work, verify, repeat until the verification passes (or the cap).
- *
- * Usage:
- *   /task <prompt> || <verify-script> [|| <cap>]
- *
- * The loop is event-driven. When the agent settles (nothing pending — no
- * retry, compaction, or continuation), the verify script runs:
- *   - exit 0  → task complete
- *   - failure → the agent is nudged to keep going (with the failing output),
- *               up to the cap
- *
- * Abort: while the task is active, any interactive input stops the loop.
- * The user's message is still delivered to the agent.
+ * /task runs one of three event-driven autonomous loops:
+ * - oracle: an external command decides whether work is complete
+ * - focus: repeatedly asks the agent to keep exploring
+ * - goal: an independent same-model checker verifies a private checklist
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import {
+  parseTaskArgs,
+  type ParsedTaskArgs,
+  type TaskKind,
+} from "./arguments.js";
+import {
+  createGoalChecker,
+  type GoalChecker,
+  type GoalCheckerConfig,
+} from "./goal-checker.js";
+import { inheritedArgs } from "../background-command/launch.js";
 
-const DEFAULT_CAP = 10;
-const MAX_VERIFY_OUTPUT = 8000;
 const VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
+const FOCUS_COMPACT_PERCENT = 60;
+const MAX_FEEDBACK_LENGTH = 8000;
 
-interface TaskState {
+const USAGE = [
+  "Task usage:",
+  '  /task --verify "<command>" <prompt>                    # oracle (default)',
+  "  /task --focus [--limit <runs>] <prompt>",
+  "  /task --goal <prompt>",
+].join("\n");
+
+interface BaseTask {
+  kind: TaskKind;
   prompt: string;
-  verify: string;
-  cap: number;
-  /** Completed agent runs (== verification attempts) */
   runs: number;
+  controller: AbortController;
 }
 
-const USAGE = "Task: usage /task <prompt> || <verify-script> [|| <cap>]";
-
-function parseTaskArgs(args: string): TaskState | null {
-  const parts = args
-    .trim()
-    .split(/\s*\|\|\s*/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-
-  if (parts.length === 3) {
-    const cap = Number.parseInt(parts[2], 10);
-    if (!Number.isFinite(cap) || cap < 1) return null;
-    return { prompt: parts[0], verify: parts[1], cap, runs: 0 };
-  }
-  if (parts.length === 2) {
-    return { prompt: parts[0], verify: parts[1], cap: DEFAULT_CAP, runs: 0 };
-  }
-  return null;
+interface OracleTask extends BaseTask {
+  kind: "oracle";
+  verify: string;
 }
 
-/** Keep the tail of long output (test summaries live at the end). */
-function keepTail(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return `… [truncated ${s.length - max} chars from start]\n${s.slice(-max)}`;
+interface FocusTask extends BaseTask {
+  kind: "focus";
+  limit?: number;
 }
 
-export default function (pi: ExtensionAPI) {
-  let task: TaskState | null = null;
+interface GoalTask extends BaseTask {
+  kind: "goal";
+  phase: "planning" | "working" | "checking";
+  checker?: GoalChecker;
+}
 
-  const stop = (
+type ActiveTask = OracleTask | FocusTask | GoalTask;
+
+export interface TaskOptions {
+  goalCheckerFactory?: (
+    config: GoalCheckerConfig,
+  ) => GoalChecker | Promise<GoalChecker>;
+  /** SDK hosts can explicitly provide the child process resource flags. */
+  launchArgs?: string[];
+}
+
+function keepTail(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `… [truncated ${text.length - max} chars from start]\n${text.slice(-max)}`;
+}
+
+function focusContinuation(prompt: string): string {
+  return [
+    prompt,
+    "",
+    "The current run is not exhausted. Be creative and try different approaches. Use any context-management tools available to you. Continue working instead of returning a final answer.",
+  ].join("\n");
+}
+
+function goalContinuation(prompt: string, feedback: string): string {
+  return [
+    prompt,
+    "",
+    "The independent goal evaluator determined that the goal is not complete.",
+    "",
+    keepTail(feedback, MAX_FEEDBACK_LENGTH),
+    "",
+    "Continue working on the goal. Address the evidence-based gaps, then verify your work before returning.",
+  ].join("\n");
+}
+
+function makeTask(parsed: ParsedTaskArgs): ActiveTask {
+  const base = {
+    prompt: parsed.prompt,
+    runs: 0,
+    controller: new AbortController(),
+  };
+  if (parsed.kind === "oracle")
+    return { ...base, kind: "oracle", verify: parsed.verify! };
+  if (parsed.kind === "focus")
+    return { ...base, kind: "focus", limit: parsed.limit };
+  return { ...base, kind: "goal", phase: "planning" };
+}
+
+function runLabel(task: ActiveTask, run: number): string {
+  if (task.kind === "focus" && task.limit) return `${run}/${task.limit}`;
+  return String(run);
+}
+
+export default function taskExtension(
+  pi: ExtensionAPI,
+  options: TaskOptions = {},
+): void {
+  // Goal evaluators may inherit the package's extension paths. They should not
+  // expose /task recursively inside the checker process.
+  if (process.env.PI_TASK_GOAL_CHILD === "1") return;
+
+  const launchCwd = process.cwd();
+  const launchArgv = process.argv.slice(2);
+  const goalCheckerFactory = options.goalCheckerFactory ?? createGoalChecker;
+  let startupProvider: string | undefined;
+  let task: ActiveTask | null = null;
+
+  const notify = (
     ctx: ExtensionContext,
     message: string,
     type: "info" | "warning" | "error" = "info",
   ) => {
-    task = null;
-    ctx.ui.notify(message, type);
-    ctx.ui.setStatus("task", undefined);
+    if (ctx.hasUI) ctx.ui.notify(message, type);
   };
 
-  const setStatusLine = (ctx: ExtensionContext, runNo: number, cap: number) =>
-    ctx.ui.setStatus("task", ctx.ui.theme.fg("accent", `↻ task ${runNo}/${cap}`));
+  const setStatus = (ctx: ExtensionContext, text?: string) => {
+    if (!ctx.hasUI) return;
+    ctx.ui.setStatus(
+      "task",
+      text === undefined ? undefined : ctx.ui.theme.fg("accent", text),
+    );
+  };
 
-  // Any interactive input while a task is active stops the loop. task's own
-  // sendUserMessage calls use source "extension", so they never trip this.
+  const dispose = (active: ActiveTask) => {
+    active.controller.abort();
+    if (active.kind === "goal" && active.checker)
+      void active.checker.dispose().catch(() => {});
+  };
+
+  const stop = (
+    ctx: ExtensionContext,
+    active: ActiveTask,
+    message: string,
+    type: "info" | "warning" | "error" = "info",
+  ) => {
+    if (task !== active) return;
+    task = null;
+    dispose(active);
+    notify(ctx, message, type);
+    setStatus(ctx);
+  };
+
+  const setWorkingStatus = (
+    ctx: ExtensionContext,
+    active: ActiveTask,
+    run: number,
+  ) => setStatus(ctx, `↻ task ${active.kind} ${runLabel(active, run)}`);
+
+  const compactFocus = async (
+    ctx: ExtensionContext,
+    active: FocusTask,
+  ): Promise<boolean> => {
+    const usage = ctx.getContextUsage();
+    if (usage?.percent === null || usage?.percent === undefined) return true;
+    if (usage.percent < FOCUS_COMPACT_PERCENT) return true;
+
+    setStatus(ctx, `↻ task focus compacting (${Math.round(usage.percent)}%)`);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        ctx.compact({
+          customInstructions:
+            "Preserve the active focus task exactly, plus all attempted approaches, concrete findings, constraints, modified files, failures, and promising next experiments so creative work can continue after compaction.",
+          onComplete: () => resolve(),
+          onError: reject,
+        });
+      });
+      return task === active;
+    } catch (error) {
+      if (task === active)
+        stop(
+          ctx,
+          active,
+          `Task focus: compaction failed — ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      return false;
+    }
+  };
+
+  pi.on("session_start", (event, ctx) => {
+    if (event.reason === "startup") startupProvider ??= ctx.model?.provider;
+  });
+
+  // Any interactive input stops the active loop. Extension-generated messages
+  // have source "extension" and therefore do not stop themselves.
   pi.on("input", async (event, ctx) => {
     if (task && event.source === "interactive") {
-      stop(ctx, "Task: stopped", "info");
+      const active = task;
+      stop(ctx, active, `Task ${active.kind}: stopped`);
     }
     return { action: "continue" };
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
-    const t = task;
-    if (!t) return;
-
-    t.runs += 1;
-    ctx.ui.setStatus(
-      "task",
-      ctx.ui.theme.fg("accent", `↻ task verifying (${t.runs}/${t.cap})`),
-    );
-
-    const result = await pi.exec("bash", ["-c", t.verify], {
-      cwd: ctx.cwd,
-      timeout: VERIFY_TIMEOUT_MS,
-    });
-
-    // The task may have been stopped (interactive input) while verifying.
-    if (task !== t) return;
-
-    if (result.killed) {
-      stop(ctx, `Task: verification timed out after ${VERIFY_TIMEOUT_MS / 1000}s — stopping`, "error");
+  pi.on("agent_settled", async (event, ctx) => {
+    const active = task;
+    if (!active) return;
+    if (event.aborted) {
+      stop(
+        ctx,
+        active,
+        `Task ${active.kind}: agent run was aborted`,
+        "warning",
+      );
       return;
     }
 
-    if (result.code === 0) {
-      stop(ctx, `Task: verification passed after ${t.runs} run(s)`);
+    active.runs += 1;
+
+    if (active.kind === "oracle") {
+      setStatus(
+        ctx,
+        `↻ task oracle verifying (${runLabel(active, active.runs)})`,
+      );
+      const result = await pi.exec("bash", ["-c", active.verify], {
+        cwd: ctx.cwd,
+        timeout: VERIFY_TIMEOUT_MS,
+        signal: active.controller.signal,
+      });
+      if (task !== active) return;
+      if (result.killed) {
+        stop(
+          ctx,
+          active,
+          `Task oracle: verification timed out after ${VERIFY_TIMEOUT_MS / 1000}s`,
+          "error",
+        );
+        return;
+      }
+      if (result.code === 0) {
+        stop(
+          ctx,
+          active,
+          `Task oracle: verification passed after ${active.runs} run(s)`,
+        );
+        return;
+      }
+
+      setWorkingStatus(ctx, active, active.runs + 1);
+      // The oracle's output is deliberately not fed to the implementing agent.
+      // Repeating the original task keeps the loop focused on the user's goal.
+      pi.sendUserMessage(active.prompt);
       return;
     }
 
-    if (t.runs >= t.cap) {
-      stop(ctx, `Task: hit cap of ${t.cap} runs without verification passing`, "warning");
+    if (active.kind === "focus") {
+      if (active.limit !== undefined && active.runs >= active.limit) {
+        stop(
+          ctx,
+          active,
+          `Task focus: reached the limit of ${active.limit} run(s)`,
+        );
+        return;
+      }
+      if (!(await compactFocus(ctx, active)) || task !== active) return;
+      setWorkingStatus(ctx, active, active.runs + 1);
+      pi.sendUserMessage(focusContinuation(active.prompt));
       return;
     }
 
-    setStatusLine(ctx, t.runs + 1, t.cap);
-    const output = result.stdout + (result.stderr ? `\n--- stderr ---\n${result.stderr}` : "");
-    const nudge = [
-      `The verification command \`${t.verify}\` is still failing (exit ${result.code}). Latest output:`,
-      "",
-      "```",
-      keepTail(output, MAX_VERIFY_OUTPUT) || "(no output)",
-      "```",
-      "",
-      "Keep working on the task until the verification passes.",
-    ].join("\n");
-    pi.sendUserMessage(nudge);
+    if (!active.checker) {
+      stop(ctx, active, "Task goal: checker is unavailable", "error");
+      return;
+    }
+    active.phase = "checking";
+    setStatus(ctx, `↻ task goal checking (${active.runs})`);
+    try {
+      const decision = await active.checker.evaluate(active.controller.signal);
+      if (task !== active) return;
+      if (decision.complete) {
+        stop(
+          ctx,
+          active,
+          `Task goal: independently verified after ${active.runs} run(s)`,
+        );
+        return;
+      }
+      active.phase = "working";
+      setWorkingStatus(ctx, active, active.runs + 1);
+      pi.sendUserMessage(goalContinuation(active.prompt, decision.feedback));
+    } catch (error) {
+      if (task === active)
+        stop(
+          ctx,
+          active,
+          `Task goal: checker failed — ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+    }
   });
 
   pi.on("session_shutdown", () => {
+    const active = task;
     task = null;
+    if (active) dispose(active);
   });
 
   pi.registerCommand("task", {
     description:
-      "Run a task until a verification command succeeds. Usage: /task <prompt> || <verify> [|| <cap>]",
+      "Run an oracle, focus, or independently checked goal task. Use /task --help for syntax.",
     handler: async (args, ctx) => {
+      if (args.trim() === "--help" || !args.trim()) {
+        notify(ctx, USAGE, args.trim() ? "info" : "warning");
+        return;
+      }
       if (task) {
-        ctx.ui.notify(
+        notify(
+          ctx,
           "Task: a task is already running. Send a message to stop it first.",
           "warning",
         );
@@ -144,23 +329,80 @@ export default function (pi: ExtensionAPI) {
       }
 
       const parsed = parseTaskArgs(args);
-      if (!parsed) {
-        ctx.ui.notify(
-          args.trim()
-            ? USAGE
-            : `${USAGE}  (e.g. /task fix the failing tests || npm test)`,
-          args.trim() ? "warning" : "info",
-        );
+      if (!parsed.ok) {
+        notify(ctx, `Task: ${parsed.error}\n\n${USAGE}`, "warning");
         return;
       }
 
-      task = parsed;
-      ctx.ui.notify(
-        `Task: starting (max ${parsed.cap} runs, verify: ${parsed.verify}). Send any message to stop.`,
-        "info",
+      const active = makeTask(parsed.value);
+      task = active;
+
+      if (active.kind === "oracle") {
+        notify(
+          ctx,
+          `Task oracle: starting (verify: ${active.verify}). Send any message to stop.`,
+        );
+        setWorkingStatus(ctx, active, 1);
+        pi.sendUserMessage(active.prompt);
+        return;
+      }
+
+      if (active.kind === "focus") {
+        notify(
+          ctx,
+          `Task focus: starting${active.limit ? ` (limit ${active.limit} runs)` : ""}. Send any message to stop.`,
+        );
+        setWorkingStatus(ctx, active, 1);
+        pi.sendUserMessage(active.prompt);
+        return;
+      }
+
+      if (!ctx.model) {
+        stop(ctx, active, "Task goal: no active model is available", "error");
+        return;
+      }
+
+      notify(
+        ctx,
+        "Task goal: creating an independent verification checklist before implementation starts. Send any message to stop.",
       );
-      setStatusLine(ctx, 1, parsed.cap);
-      pi.sendUserMessage(parsed.prompt);
+      setStatus(ctx, "↻ task goal planning");
+      try {
+        const launchArgs =
+          options.launchArgs ??
+          inheritedArgs(
+            launchArgv,
+            launchCwd,
+            ctx.model.provider,
+            startupProvider,
+          );
+        const checker = await goalCheckerFactory({
+          cwd: ctx.cwd,
+          prompt: active.prompt,
+          model: { provider: ctx.model.provider, id: ctx.model.id },
+          thinkingLevel: ctx.thinkingLevel,
+          projectTrusted: ctx.isProjectTrusted(),
+          launchArgs,
+        });
+        if (task !== active) {
+          await checker.dispose();
+          return;
+        }
+        active.checker = checker;
+        await checker.initialize(active.controller.signal);
+        if (task !== active) return;
+        active.phase = "working";
+        setWorkingStatus(ctx, active, 1);
+        pi.sendUserMessage(active.prompt);
+      } catch (error) {
+        if (task === active)
+          stop(
+            ctx,
+            active,
+            `Task goal: could not initialize checker — ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+      }
     },
   });
 }

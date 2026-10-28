@@ -24,7 +24,7 @@ The compatibility tests load every active extension through Pi. Scratchpad tests
 | [pipeline-command](./extensions/pipeline-command/) | Extension (command) | `/pipeline` — execute JSON-defined pipelines of agent steps with optional model/system-prompt/script/worktree overrides |
 | [scratchpad](./extensions/scratchpad/) | Extension | Session-scoped temporary files; restores guidance only when missing from outgoing context |
 | [shell-command](./extensions/shell-command/) | Extension (command) | `/shell` — fresh interactive shell; exit silently back to Pi |
-| [task](./extensions/task/) | Extension (command) | `/task` — run a task until a verification command succeeds (loop with nudges, cap, abort-on-input) |
+| [task](./extensions/task/) | Extension (command) | `/task` — oracle, focus, and independently verified goal loops with flag-based arguments |
 | [web-fetch-tool](./extensions/web-fetch-tool/) | Extension (tool) | Fetch URLs and extract structured content from webpages and supported domains |
 | [worktree-command](./extensions/worktree-command/) | Extension (command) | `/worktree` — fork branch into `.worktrees/`, switch/merge/cleanup, with autocomplete |
 

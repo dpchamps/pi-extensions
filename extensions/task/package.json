@@ -1,7 +1,7 @@
 {
   "name": "@dpchamps/pi-task",
-  "version": "0.2.0",
-  "description": "pi extension: /task — run a task until a verification command succeeds",
+  "version": "0.3.0",
+  "description": "pi extension: /task — oracle, focus, and independently verified goal loops",
   "author": "dpchamps",
   "license": "MIT",
   "type": "module",
