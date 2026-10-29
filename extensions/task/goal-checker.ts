@@ -20,6 +20,14 @@ export interface GoalDecision {
   feedback: string;
 }
 
+export type GoalCheckerPhase = "planning" | "evaluation";
+
+export interface GoalCheckerUpdate {
+  phase: GoalCheckerPhase;
+  type: "status" | "text" | "tool" | "checklist";
+  text: string;
+}
+
 export interface GoalChecker {
   initialize(signal: AbortSignal): Promise<void>;
   evaluate(signal: AbortSignal): Promise<GoalDecision>;
@@ -34,6 +42,7 @@ export interface GoalCheckerConfig {
   projectTrusted: boolean;
   launchArgs?: string[];
   invocation?: Invocation;
+  onUpdate?: (update: GoalCheckerUpdate) => void;
 }
 
 function assistantText(message: unknown): string | undefined {
@@ -96,14 +105,34 @@ export function parseGoalDecision(text: string): GoalDecision {
   throw new Error("goal checker did not return a valid completion decision");
 }
 
+function toolSummary(name: string, args: unknown): string {
+  const input = args as Record<string, unknown> | undefined;
+  let detail = "";
+  if (name === "bash" && typeof input?.command === "string")
+    detail = `$ ${input.command}`;
+  else if (typeof input?.path === "string") detail = `${name} ${input.path}`;
+  else if (typeof input?.file_path === "string")
+    detail = `${name} ${input.file_path}`;
+  else {
+    try {
+      detail = `${name} ${JSON.stringify(args ?? {})}`;
+    } catch {
+      detail = name;
+    }
+  }
+  return detail.length > 240 ? `${detail.slice(0, 239)}…` : detail;
+}
+
 async function runChecker(
   config: GoalCheckerConfig,
   systemPromptPath: string,
   request: string,
+  phase: GoalCheckerPhase,
   signal: AbortSignal,
 ): Promise<string> {
   if (signal.aborted) throw new Error("goal checker was cancelled");
 
+  config.onUpdate?.({ phase, type: "status", text: "Starting" });
   const invocation = config.invocation ?? hostInvocation();
   const args = [
     ...invocation.args,
@@ -165,8 +194,30 @@ async function runChecker(
     const processLine = (line: string) => {
       if (!line.trim()) return;
       try {
-        const event = JSON.parse(line) as { type?: string; message?: unknown };
-        if (event.type === "message_end") {
+        const event = JSON.parse(line) as {
+          type?: string;
+          message?: unknown;
+          toolName?: string;
+          args?: unknown;
+          assistantMessageEvent?: { type?: string; delta?: string };
+        };
+        if (
+          event.type === "message_update" &&
+          event.assistantMessageEvent?.type === "text_delta" &&
+          event.assistantMessageEvent.delta
+        ) {
+          config.onUpdate?.({
+            phase,
+            type: "text",
+            text: event.assistantMessageEvent.delta,
+          });
+        } else if (event.type === "tool_execution_start" && event.toolName) {
+          config.onUpdate?.({
+            phase,
+            type: "tool",
+            text: toolSummary(event.toolName, event.args),
+          });
+        } else if (event.type === "message_end") {
           const text = assistantText(event.message);
           if (text !== undefined) finalText = text;
         }
@@ -221,6 +272,7 @@ async function runChecker(
         );
         return;
       }
+      config.onUpdate?.({ phase, type: "status", text: "Finished" });
       resolve(finalText);
     });
   });
@@ -257,11 +309,17 @@ export async function createGoalChecker(
           config.prompt,
           "</goal>",
         ].join("\n"),
+        "planning",
         signal,
       );
       const checklist = await readFile(checklistPath, "utf8");
       if (checklist.trim().length < 20)
         throw new Error("goal checker did not create a usable checklist");
+      config.onUpdate?.({
+        phase: "planning",
+        type: "checklist",
+        text: checklist.trim(),
+      });
     },
 
     async evaluate(signal) {
@@ -283,8 +341,15 @@ export async function createGoalChecker(
           config.prompt,
           "</goal>",
         ].join("\n"),
+        "evaluation",
         signal,
       );
+      const checklist = await readFile(checklistPath, "utf8");
+      config.onUpdate?.({
+        phase: "evaluation",
+        type: "checklist",
+        text: checklist.trim(),
+      });
       return parseGoalDecision(output);
     },
 

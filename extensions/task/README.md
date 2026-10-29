@@ -64,6 +64,8 @@ Before implementation starts, the evaluator:
 2. Creates a private temporary Markdown checklist with concrete acceptance criteria.
 3. Adds a direct verification method to every checklist item.
 
+Planner text and tool activity stream into a live `Goal planner` widget in the terminal. When planning finishes, the widget shows the generated checklist. Later evaluation runs stream into the same widget and refresh it with the updated checklist.
+
 Whenever the main agent settles, a fresh evaluator run reads that checklist and inspects the live workspace. It is explicitly instructed to:
 
 - verify with files, diffs, tests, typechecks, and focused commands;

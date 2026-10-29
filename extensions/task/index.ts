@@ -18,6 +18,7 @@ import {
   createGoalChecker,
   type GoalChecker,
   type GoalCheckerConfig,
+  type GoalCheckerUpdate,
 } from "./goal-checker.js";
 import { inheritedArgs } from "../background-command/launch.js";
 
@@ -53,9 +54,16 @@ interface GoalTask extends BaseTask {
   kind: "goal";
   phase: "planning" | "working" | "checking";
   checker?: GoalChecker;
+  display?: GoalStreamDisplay;
 }
 
 type ActiveTask = OracleTask | FocusTask | GoalTask;
+
+interface GoalStreamDisplay {
+  update(update: GoalCheckerUpdate): void;
+  flush(): void;
+  clear(): void;
+}
 
 export interface TaskOptions {
   goalCheckerFactory?: (
@@ -108,6 +116,66 @@ function runLabel(task: ActiveTask, run: number): string {
   return String(run);
 }
 
+function createGoalStreamDisplay(ctx: ExtensionContext): GoalStreamDisplay {
+  if (!ctx.hasUI) return { update() {}, flush() {}, clear() {} };
+
+  const key = "task-goal-stream";
+  let phase: GoalCheckerUpdate["phase"] = "planning";
+  let parts: Array<{ type: "line" | "text"; text: string }> = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const render = () => {
+    clearTimeout(timer);
+    timer = undefined;
+    const lines = parts.flatMap((part) => part.text.split("\n"));
+    const visible = lines.slice(-18);
+    const title = phase === "planning" ? "Goal planner" : "Goal evaluator";
+    ctx.ui.setWidget(key, [
+      ctx.ui.theme.fg("accent", `── ${title} (live) ──`),
+      ...visible.map((line) =>
+        line.startsWith("→ ") ? ctx.ui.theme.fg("muted", line) : line,
+      ),
+    ]);
+  };
+
+  const schedule = () => {
+    if (timer) return;
+    timer = setTimeout(render, 40);
+    timer.unref?.();
+  };
+
+  return {
+    update(update) {
+      if (update.phase !== phase) {
+        phase = update.phase;
+        parts.push({ type: "line", text: "" });
+      }
+      if (update.type === "text") {
+        const last = parts.at(-1);
+        if (last?.type === "text") last.text += update.text;
+        else parts.push({ type: "text", text: update.text });
+      } else if (update.type === "tool") {
+        parts.push({ type: "line", text: `→ ${update.text}` });
+      } else if (update.type === "checklist") {
+        parts = [
+          { type: "line", text: "Checklist:" },
+          { type: "text", text: update.text },
+        ];
+      } else {
+        parts.push({ type: "line", text: `${update.text}…` });
+      }
+      if (update.type === "checklist") render();
+      else schedule();
+    },
+    flush: render,
+    clear() {
+      clearTimeout(timer);
+      timer = undefined;
+      ctx.ui.setWidget(key, undefined);
+    },
+  };
+}
+
 export default function taskExtension(
   pi: ExtensionAPI,
   options: TaskOptions = {},
@@ -140,8 +208,10 @@ export default function taskExtension(
 
   const dispose = (active: ActiveTask) => {
     active.controller.abort();
-    if (active.kind === "goal" && active.checker)
-      void active.checker.dispose().catch(() => {});
+    if (active.kind === "goal") {
+      active.display?.clear();
+      if (active.checker) void active.checker.dispose().catch(() => {});
+    }
   };
 
   const stop = (
@@ -367,6 +437,7 @@ export default function taskExtension(
         "Task goal: creating an independent verification checklist before implementation starts. Send any message to stop.",
       );
       setStatus(ctx, "↻ task goal planning");
+      active.display = createGoalStreamDisplay(ctx);
       try {
         const launchArgs =
           options.launchArgs ??
@@ -383,6 +454,7 @@ export default function taskExtension(
           thinkingLevel: ctx.thinkingLevel,
           projectTrusted: ctx.isProjectTrusted(),
           launchArgs,
+          onUpdate: (update) => active.display?.update(update),
         });
         if (task !== active) {
           await checker.dispose();
@@ -391,6 +463,7 @@ export default function taskExtension(
         active.checker = checker;
         await checker.initialize(active.controller.signal);
         if (task !== active) return;
+        active.display.flush();
         active.phase = "working";
         setWorkingStatus(ctx, active, 1);
         pi.sendUserMessage(active.prompt);

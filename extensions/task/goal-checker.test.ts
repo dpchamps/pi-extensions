@@ -42,6 +42,8 @@ if (!match) process.exit(2);
 const checklist = JSON.parse(match[1]);
 const planning = request.includes("Create the independent acceptance checklist");
 if (planning) await writeFile(checklist, "# Checklist\\n- [ ] Run the integration test\\n  - Verify: npm test\\n");
+console.log(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: planning ? "Planning…" : "Checking…" } }));
+console.log(JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "npm test" } }));
 const text = planning
   ? '{"ready":true}'
   : '{"complete":false,"feedback":"The integration test has not passed."}';
@@ -50,6 +52,7 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
       "utf8",
     );
 
+    const updates: Array<{ phase: string; type: string; text: string }> = [];
     const checker = await createGoalChecker({
       cwd: directory,
       prompt: "Implement the feature",
@@ -57,6 +60,7 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
       projectTrusted: false,
       launchArgs: [],
       invocation: { command: process.execPath, args: [fixture] },
+      onUpdate: (update) => updates.push(update),
     });
     try {
       await checker.initialize(new AbortController().signal);
@@ -66,6 +70,15 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
         complete: false,
         feedback: "The integration test has not passed.",
       });
+      expect(updates).toEqual(
+        expect.arrayContaining([
+          { phase: "planning", type: "text", text: "Planning…" },
+          { phase: "planning", type: "tool", text: "$ npm test" },
+          expect.objectContaining({ phase: "planning", type: "checklist" }),
+          { phase: "evaluation", type: "text", text: "Checking…" },
+          { phase: "evaluation", type: "tool", text: "$ npm test" },
+        ]),
+      );
     } finally {
       await checker.dispose();
       await rm(directory, { recursive: true, force: true });

@@ -34,6 +34,7 @@ function createHarness(options: Parameters<typeof taskExtension>[1] = {}) {
 
   const notify = vi.fn();
   const setStatus = vi.fn();
+  const setWidget = vi.fn();
   const compact = vi.fn((compactOptions: { onComplete?: () => void }) =>
     compactOptions.onComplete?.(),
   );
@@ -46,6 +47,7 @@ function createHarness(options: Parameters<typeof taskExtension>[1] = {}) {
     ui: {
       notify,
       setStatus,
+      setWidget,
       theme: { fg: (_color: string, text: string) => text },
     },
     getContextUsage: () => ({ tokens: 60, contextWindow: 100, percent: 60 }),
@@ -67,6 +69,7 @@ function createHarness(options: Parameters<typeof taskExtension>[1] = {}) {
     compact,
     notify,
     setStatus,
+    setWidget,
   };
 }
 
@@ -149,9 +152,20 @@ describe("task loops", () => {
 
   it("initializes a goal checker before starting and uses its independent decision", async () => {
     const order: string[] = [];
+    let streamUpdate: ((update: any) => void) | undefined;
     const checker: GoalChecker = {
       initialize: vi.fn(async () => {
         order.push("initialize");
+        streamUpdate?.({
+          phase: "planning",
+          type: "text",
+          text: "Inspecting the repository…",
+        });
+        streamUpdate?.({
+          phase: "planning",
+          type: "checklist",
+          text: "# Checklist\n- [ ] Run integration tests",
+        });
       }),
       evaluate: vi
         .fn()
@@ -172,12 +186,22 @@ describe("task loops", () => {
     };
     const harness = createHarness({
       launchArgs: [],
-      goalCheckerFactory: async () => checker,
+      goalCheckerFactory: async (config) => {
+        streamUpdate = config.onUpdate;
+        return checker;
+      },
     });
     harness.sendUserMessage.mockImplementation(() => order.push("send"));
 
     await harness.command("--goal implement checkout");
     expect(order.slice(0, 2)).toEqual(["initialize", "send"]);
+    expect(harness.setWidget).toHaveBeenCalledWith(
+      "task-goal-stream",
+      expect.arrayContaining([
+        expect.stringContaining("Goal planner (live)"),
+        "- [ ] Run integration tests",
+      ]),
+    );
 
     await harness.emit("agent_settled", { aborted: false });
     expect(order).toContain("evaluate-incomplete");
