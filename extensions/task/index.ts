@@ -18,8 +18,11 @@ import {
   createGoalChecker,
   type GoalChecker,
   type GoalCheckerConfig,
-  type GoalCheckerUpdate,
 } from "./goal-checker.js";
+import {
+  createGoalStreamDisplay,
+  type GoalStreamDisplay,
+} from "./goal-output.js";
 import { inheritedArgs } from "../background-command/launch.js";
 
 const VERIFY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -31,12 +34,15 @@ const USAGE = [
   '  /task --verify "<command>" <prompt>                    # oracle (default)',
   "  /task --focus [--limit <runs>] <prompt>",
   "  /task --goal <prompt>",
+  "  /task cancel                                         # cancel the active task",
 ].join("\n");
 
 interface BaseTask {
   kind: TaskKind;
   prompt: string;
   runs: number;
+  settling: boolean;
+  pendingPrompt?: string;
   controller: AbortController;
 }
 
@@ -58,12 +64,6 @@ interface GoalTask extends BaseTask {
 }
 
 type ActiveTask = OracleTask | FocusTask | GoalTask;
-
-interface GoalStreamDisplay {
-  update(update: GoalCheckerUpdate): void;
-  flush(): void;
-  clear(): void;
-}
 
 export interface TaskOptions {
   goalCheckerFactory?: (
@@ -102,6 +102,7 @@ function makeTask(parsed: ParsedTaskArgs): ActiveTask {
   const base = {
     prompt: parsed.prompt,
     runs: 0,
+    settling: false,
     controller: new AbortController(),
   };
   if (parsed.kind === "oracle")
@@ -114,66 +115,6 @@ function makeTask(parsed: ParsedTaskArgs): ActiveTask {
 function runLabel(task: ActiveTask, run: number): string {
   if (task.kind === "focus" && task.limit) return `${run}/${task.limit}`;
   return String(run);
-}
-
-function createGoalStreamDisplay(ctx: ExtensionContext): GoalStreamDisplay {
-  if (!ctx.hasUI) return { update() {}, flush() {}, clear() {} };
-
-  const key = "task-goal-stream";
-  let phase: GoalCheckerUpdate["phase"] = "planning";
-  let parts: Array<{ type: "line" | "text"; text: string }> = [];
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  const render = () => {
-    clearTimeout(timer);
-    timer = undefined;
-    const lines = parts.flatMap((part) => part.text.split("\n"));
-    const visible = lines.slice(-18);
-    const title = phase === "planning" ? "Goal planner" : "Goal evaluator";
-    ctx.ui.setWidget(key, [
-      ctx.ui.theme.fg("accent", `── ${title} (live) ──`),
-      ...visible.map((line) =>
-        line.startsWith("→ ") ? ctx.ui.theme.fg("muted", line) : line,
-      ),
-    ]);
-  };
-
-  const schedule = () => {
-    if (timer) return;
-    timer = setTimeout(render, 40);
-    timer.unref?.();
-  };
-
-  return {
-    update(update) {
-      if (update.phase !== phase) {
-        phase = update.phase;
-        parts.push({ type: "line", text: "" });
-      }
-      if (update.type === "text") {
-        const last = parts.at(-1);
-        if (last?.type === "text") last.text += update.text;
-        else parts.push({ type: "text", text: update.text });
-      } else if (update.type === "tool") {
-        parts.push({ type: "line", text: `→ ${update.text}` });
-      } else if (update.type === "checklist") {
-        parts = [
-          { type: "line", text: "Checklist:" },
-          { type: "text", text: update.text },
-        ];
-      } else {
-        parts.push({ type: "line", text: `${update.text}…` });
-      }
-      if (update.type === "checklist") render();
-      else schedule();
-    },
-    flush: render,
-    clear() {
-      clearTimeout(timer);
-      timer = undefined;
-      ctx.ui.setWidget(key, undefined);
-    },
-  };
 }
 
 export default function taskExtension(
@@ -268,26 +209,36 @@ export default function taskExtension(
     if (event.reason === "startup") startupProvider ??= ctx.model?.provider;
   });
 
-  // Any interactive input stops the active loop. Extension-generated messages
-  // have source "extension" and therefore do not stop themselves.
-  pi.on("input", async (event, ctx) => {
-    if (task && event.source === "interactive") {
-      const active = task;
-      stop(ctx, active, `Task ${active.kind}: stopped`);
+  // Chat may start another run while a verifier is still running. Hold task
+  // prompts locally until idle so /task cancel can discard pending work too.
+  const sendPrompt = (
+    ctx: ExtensionContext,
+    active: ActiveTask,
+    prompt: string,
+  ) => {
+    if (!ctx.isIdle()) {
+      active.pendingPrompt = prompt;
+      return;
     }
-    return { action: "continue" };
-  });
+    active.pendingPrompt = undefined;
+    pi.sendUserMessage(prompt);
+  };
 
-  pi.on("agent_settled", async (event, ctx) => {
-    const active = task;
-    if (!active) return;
-    if (event.aborted) {
-      stop(
+  const settleTask = async (
+    ctx: ExtensionContext,
+    active: ActiveTask,
+    aborted: boolean,
+  ) => {
+    if (aborted) {
+      // Interrupting one agent run is not task cancellation. Only /task cancel
+      // clears the loop; an interrupted run resumes without verifying partial work.
+      notify(
         ctx,
-        active,
-        `Task ${active.kind}: agent run was aborted`,
+        `Task ${active.kind}: agent run interrupted; resuming. Use /task cancel to cancel the task.`,
         "warning",
       );
+      setWorkingStatus(ctx, active, active.runs + 1);
+      sendPrompt(ctx, active, active.pendingPrompt ?? active.prompt);
       return;
     }
 
@@ -325,7 +276,7 @@ export default function taskExtension(
       setWorkingStatus(ctx, active, active.runs + 1);
       // The oracle's output is deliberately not fed to the implementing agent.
       // Repeating the original task keeps the loop focused on the user's goal.
-      pi.sendUserMessage(active.prompt);
+      sendPrompt(ctx, active, active.prompt);
       return;
     }
 
@@ -340,7 +291,7 @@ export default function taskExtension(
       }
       if (!(await compactFocus(ctx, active)) || task !== active) return;
       setWorkingStatus(ctx, active, active.runs + 1);
-      pi.sendUserMessage(focusContinuation(active.prompt));
+      sendPrompt(ctx, active, focusContinuation(active.prompt));
       return;
     }
 
@@ -363,7 +314,11 @@ export default function taskExtension(
       }
       active.phase = "working";
       setWorkingStatus(ctx, active, active.runs + 1);
-      pi.sendUserMessage(goalContinuation(active.prompt, decision.feedback));
+      sendPrompt(
+        ctx,
+        active,
+        goalContinuation(active.prompt, decision.feedback),
+      );
     } catch (error) {
       if (task === active)
         stop(
@@ -372,6 +327,28 @@ export default function taskExtension(
           `Task goal: checker failed — ${error instanceof Error ? error.message : String(error)}`,
           "error",
         );
+    }
+  };
+
+  pi.on("agent_settled", async (event, ctx) => {
+    const active = task;
+    // Ignore incidental chat runs during planning and serialize verification
+    // across runs, including when chat finishes during a checker operation.
+    if (
+      !active ||
+      active.settling ||
+      (active.kind === "goal" && active.phase === "planning")
+    )
+      return;
+    if (!event.aborted && active.pendingPrompt !== undefined) {
+      sendPrompt(ctx, active, active.pendingPrompt);
+      return;
+    }
+    active.settling = true;
+    try {
+      await settleTask(ctx, active, event.aborted);
+    } finally {
+      active.settling = false;
     }
   });
 
@@ -385,6 +362,16 @@ export default function taskExtension(
     description:
       "Run an oracle, focus, or independently checked goal task. Use /task --help for syntax.",
     handler: async (args, ctx) => {
+      if (args.trim() === "cancel") {
+        if (!task) {
+          notify(ctx, "Task: no task is running.", "warning");
+          return;
+        }
+        const active = task;
+        stop(ctx, active, `Task ${active.kind}: cancelled`);
+        if (!ctx.isIdle()) ctx.abort();
+        return;
+      }
       if (args.trim() === "--help" || !args.trim()) {
         notify(ctx, USAGE, args.trim() ? "info" : "warning");
         return;
@@ -392,7 +379,7 @@ export default function taskExtension(
       if (task) {
         notify(
           ctx,
-          "Task: a task is already running. Send a message to stop it first.",
+          "Task: a task is already running. Use /task cancel to cancel it first.",
           "warning",
         );
         return;
@@ -410,20 +397,20 @@ export default function taskExtension(
       if (active.kind === "oracle") {
         notify(
           ctx,
-          `Task oracle: starting (verify: ${active.verify}). Send any message to stop.`,
+          `Task oracle: starting (verify: ${active.verify}). Use /task cancel to cancel.`,
         );
         setWorkingStatus(ctx, active, 1);
-        pi.sendUserMessage(active.prompt);
+        sendPrompt(ctx, active, active.prompt);
         return;
       }
 
       if (active.kind === "focus") {
         notify(
           ctx,
-          `Task focus: starting${active.limit ? ` (limit ${active.limit} runs)` : ""}. Send any message to stop.`,
+          `Task focus: starting${active.limit ? ` (limit ${active.limit} runs)` : ""}. Use /task cancel to cancel.`,
         );
         setWorkingStatus(ctx, active, 1);
-        pi.sendUserMessage(active.prompt);
+        sendPrompt(ctx, active, active.prompt);
         return;
       }
 
@@ -434,7 +421,7 @@ export default function taskExtension(
 
       notify(
         ctx,
-        "Task goal: creating an independent verification checklist before implementation starts. Send any message to stop.",
+        "Task goal: creating an independent verification checklist before implementation starts. Use /task cancel to cancel.",
       );
       setStatus(ctx, "↻ task goal planning");
       active.display = createGoalStreamDisplay(ctx);
@@ -466,7 +453,7 @@ export default function taskExtension(
         active.display.flush();
         active.phase = "working";
         setWorkingStatus(ctx, active, 1);
-        pi.sendUserMessage(active.prompt);
+        sendPrompt(ctx, active, active.prompt);
       } catch (error) {
         if (task === active)
           stop(

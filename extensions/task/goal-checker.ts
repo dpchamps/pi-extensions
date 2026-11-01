@@ -24,8 +24,10 @@ export type GoalCheckerPhase = "planning" | "evaluation";
 
 export interface GoalCheckerUpdate {
   phase: GoalCheckerPhase;
-  type: "status" | "text" | "tool" | "checklist";
+  type: "status" | "text" | "thinking" | "tool" | "tool_output" | "checklist";
   text: string;
+  /** Tool output updates are cumulative snapshots, keyed within one checker run. */
+  id?: string;
 }
 
 export interface GoalChecker {
@@ -120,7 +122,17 @@ function toolSummary(name: string, args: unknown): string {
       detail = name;
     }
   }
-  return detail.length > 240 ? `${detail.slice(0, 239)}…` : detail;
+  return detail;
+}
+
+function resultText(result: unknown): string {
+  const content = (result as { content?: unknown } | undefined)?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
 }
 
 async function runChecker(
@@ -165,6 +177,7 @@ async function runChecker(
     let buffer = "";
     let stderr = "";
     let finalText = "";
+    let streamedText = false;
     let failure: Error | undefined;
     let timedOut = false;
     let escalation: ReturnType<typeof setTimeout> | undefined;
@@ -198,18 +211,24 @@ async function runChecker(
           type?: string;
           message?: unknown;
           toolName?: string;
+          toolCallId?: string;
           args?: unknown;
+          partialResult?: unknown;
+          result?: unknown;
           assistantMessageEvent?: { type?: string; delta?: string };
         };
+        const delta = event.assistantMessageEvent;
+        if (event.type === "message_start") streamedText = false;
         if (
           event.type === "message_update" &&
-          event.assistantMessageEvent?.type === "text_delta" &&
-          event.assistantMessageEvent.delta
+          (delta?.type === "text_delta" || delta?.type === "thinking_delta") &&
+          delta.delta
         ) {
+          if (delta.type === "text_delta") streamedText = true;
           config.onUpdate?.({
             phase,
-            type: "text",
-            text: event.assistantMessageEvent.delta,
+            type: delta.type === "text_delta" ? "text" : "thinking",
+            text: delta.delta,
           });
         } else if (event.type === "tool_execution_start" && event.toolName) {
           config.onUpdate?.({
@@ -217,9 +236,31 @@ async function runChecker(
             type: "tool",
             text: toolSummary(event.toolName, event.args),
           });
+        } else if (
+          (event.type === "tool_execution_update" ||
+            event.type === "tool_execution_end") &&
+          event.toolCallId
+        ) {
+          const text = resultText(
+            event.type === "tool_execution_update"
+              ? event.partialResult
+              : event.result,
+          );
+          if (text)
+            config.onUpdate?.({
+              phase,
+              type: "tool_output",
+              id: event.toolCallId,
+              text,
+            });
         } else if (event.type === "message_end") {
           const text = assistantText(event.message);
-          if (text !== undefined) finalText = text;
+          if (text !== undefined) {
+            finalText = text;
+            if (text && !streamedText)
+              config.onUpdate?.({ phase, type: "text", text });
+            streamedText = false;
+          }
         }
       } catch (error) {
         if (error instanceof SyntaxError) return;

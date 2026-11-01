@@ -8,6 +8,7 @@ Adds `/task` with three autonomous task loops: **oracle**, **focus**, and **goal
 /task --verify "<command>" <prompt>                    # oracle (default)
 /task --focus [--limit <runs>] <prompt>
 /task --goal <prompt>
+/task cancel                                         # cancel the active task
 ```
 
 The canonical type flag is `--type oracle|focus|goal`. The convenience flags `--oracle`, `--focus`, and `--goal` are equivalent. `--kind` is accepted as an alias for `--type`.
@@ -24,7 +25,7 @@ Examples:
 /task --goal implement the cart feature and verify it end to end
 ```
 
-Send any interactive message while a task is active to stop its loop. The message is still delivered normally.
+Chat messages are delivered normally and **do not cancel the task**. Use `/task cancel` to cancel the active loop, abort any in-progress verifier or goal checker, and interrupt the main agent if it is running. Interrupting an individual agent run (for example with Escape) resumes the task rather than cancelling it. A new task cannot start until the current task ends or is cancelled.
 
 ## Oracle (default)
 
@@ -64,7 +65,14 @@ Before implementation starts, the evaluator:
 2. Creates a private temporary Markdown checklist with concrete acceptance criteria.
 3. Adds a direct verification method to every checklist item.
 
-Planner text and tool activity stream into a live `Goal planner` widget in the terminal. When planning finishes, the widget shows the generated checklist. Later evaluation runs stream into the same widget and refresh it with the updated checklist.
+Planner and evaluator output streams into a compact bordered window above the chat editor, including text, thinking, tool calls, tool output, and checklists. The window automatically follows new output and wraps long lines instead of clipping them. Earlier output remains available throughout the task; a new checklist or evaluation does not erase it.
+
+- **Alt+↑ / Alt+↓**: scroll one line.
+- **Alt+PageUp / Alt+PageDown**: scroll one page.
+- **Alt+Home**: jump to the beginning.
+- **Alt+End**: return to live auto-follow.
+
+Scrolling back pauses auto-follow so new output does not move what you are reading. Ordinary typing still goes to chat. The window is removed when the task ends; it is only mounted in interactive terminal mode. Tool output still respects Pi's own tool-level output limits.
 
 Whenever the main agent settles, a fresh evaluator run reads that checklist and inspects the live workspace. It is explicitly instructed to:
 
