@@ -1,0 +1,12 @@
+{
+  "name": "@dpchamps/pi-listen",
+  "version": "0.1.0",
+  "description": "Opt-in Unix-socket handoffs to the current Pi session",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

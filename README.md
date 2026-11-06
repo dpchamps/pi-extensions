@@ -21,6 +21,8 @@ The compatibility tests load every active extension through Pi. Scratchpad tests
 | [background-command](./extensions/background-command/) | Extension (command) | `/background` — confirm replay of a live user request in a supervised Pi RPC child; list/resume/kill/delete |
 | [clear-command](./extensions/clear-command/) | Extension (command) | `/clear` — wipe conversation context (keeps session & costs) |
 | [file-command](./extensions/file-command/) | Extension (command) | `/file [path]` — open a file or configured editor explorer in `$VISUAL`/`$EDITOR` |
+| [listen](./extensions/listen/) | Extension (command) | `/listen`, `/listen status`, `/listen stop` — recoverable session handoffs over a private Unix socket |
+| [pi-listen](./skills/pi-listen/) | Skill | Send handoffs from any harness, wait for replies, and recover after timeouts; copied into each listener directory |
 | [pipeline-command](./extensions/pipeline-command/) | Extension (command) | `/pipeline` — execute JSON-defined pipelines of agent steps with optional model/system-prompt/script/worktree overrides |
 | [scratchpad](./extensions/scratchpad/) | Extension | Session-scoped temporary files; restores guidance only when missing from outgoing context |
 | [shell-command](./extensions/shell-command/) | Extension (command) | `/shell` — fresh interactive shell; exit silently back to Pi |

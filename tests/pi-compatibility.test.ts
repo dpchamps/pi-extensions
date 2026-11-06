@@ -21,6 +21,7 @@ const activeExtensions = [
   "background-command",
   "clear-command",
   "file-command",
+  "listen",
   "pipeline-command",
   "runinfra",
   "scratchpad",
