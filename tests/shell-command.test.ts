@@ -1,7 +1,10 @@
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+} from "@earendil-works/pi-ai/providers/faux";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -100,7 +103,6 @@ async function harness(mode: "tui" | "rpc" | "print" = "tui") {
 }
 
 const handoff = [
-  "idle",
   "stop",
   "\x1b[?1049h\x1b[0m\x1b[2J\x1b[H",
   "\x1b[0m\x1b[?1049l",
@@ -149,6 +151,55 @@ exit 7
     expect(manager.getEntries()).toEqual(entries);
     expect(session!.messages).toEqual([]);
     expect(faux.state.callCount).toBe(0);
+  });
+
+  it("opens during a turn and lets the agent finish while the shell is still open", async () => {
+    const executable = join(cwd, "waiting-shell");
+    const started = join(cwd, "started");
+    const exit = join(cwd, "exit");
+    await writeFile(
+      executable,
+      `#!/bin/sh
+: > "$PI_SHELL_STARTED"
+while [ ! -f "$PI_SHELL_EXIT" ]; do sleep 0.01; done
+`,
+      { mode: 0o755 },
+    );
+    vi.stubEnv("SHELL", executable);
+    vi.stubEnv("PI_SHELL_STARTED", started);
+    vi.stubEnv("PI_SHELL_EXIT", exit);
+    const { faux, command } = await harness();
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    faux.setResponses([
+      async () => {
+        await pending;
+        return fauxAssistantMessage("Finished in the background.");
+      },
+    ]);
+    const turn = session!.prompt("Keep working");
+    await vi.waitFor(() => expect(faux.state.callCount).toBe(1));
+    const shellRun = command();
+    try {
+      await vi.waitFor(async () =>
+        expect(await readFile(started, "utf8")).toBe(""),
+      );
+      expect(session!.isStreaming).toBe(true);
+      expect(events).not.toContain("idle");
+      expect(tui.start).not.toHaveBeenCalled();
+      finish();
+      await turn;
+      expect(session!.messages.at(-1)).toMatchObject({ role: "assistant" });
+      expect(tui.start).not.toHaveBeenCalled();
+    } finally {
+      finish();
+      await writeFile(exit, "");
+      await Promise.all([turn, shellRun]);
+    }
+    expect(events).toEqual(handoff);
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it("restores the terminal before reporting a startup failure", async () => {

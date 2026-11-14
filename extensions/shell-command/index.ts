@@ -1,6 +1,7 @@
 /** /shell borrows the terminal for a fresh interactive shell, without recording it. */
 import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { prepareShell } from "./prompt.js";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("shell", {
@@ -11,7 +12,8 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      await ctx.waitForIdle();
+      // Extension commands run immediately, even during a turn. Keep the agent
+      // running while only its terminal UI is suspended.
       const shell = process.env.SHELL || "/bin/sh";
       const failure = await ctx.ui.custom<unknown>(
         async (tui, _theme, _kb, done) => {
@@ -23,16 +25,21 @@ export default function (pi: ExtensionAPI) {
           let failure: unknown;
           try {
             process.stdout.write("\x1b[?1049h\x1b[0m\x1b[2J\x1b[H");
-            await new Promise<void>((resolve, reject) => {
-              const child = spawn(shell, ["-i"], {
-                cwd: ctx.cwd,
-                stdio: "inherit",
-                env: process.env,
+            const launch = await prepareShell(shell);
+            try {
+              await new Promise<void>((resolve, reject) => {
+                const child = spawn(shell, launch.args, {
+                  cwd: ctx.cwd,
+                  stdio: "inherit",
+                  env: launch.env,
+                });
+                child.once("error", reject);
+                // A nonzero exit is normal shell behavior, not a Pi error.
+                child.once("close", () => resolve());
               });
-              child.once("error", reject);
-              // A nonzero exit is normal shell behavior, not a Pi error.
-              child.once("close", () => resolve());
-            });
+            } finally {
+              await launch.cleanup();
+            }
           } catch (error) {
             failure = error;
           } finally {
