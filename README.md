@@ -18,6 +18,7 @@ The compatibility tests load every active extension through Pi. Scratchpad tests
 
 | Name | Type | Description |
 |------|------|-------------|
+| [autocompact](./extensions/autocompact/) | Extension (command) | `/autocompact on\|off\|status` — opt-in idle compaction before the prompt cache expires, preferring CLM |
 | [background-command](./extensions/background-command/) | Extension (command) | `/background` — confirm replay of a live user request in a supervised Pi RPC child; list/resume/kill/delete |
 | [clear-command](./extensions/clear-command/) | Extension (command) | `/clear` — wipe conversation context (keeps session & costs) |
 | [file-command](./extensions/file-command/) | Extension (command) | `/file [path]` — open a file or configured editor explorer in `$VISUAL`/`$EDITOR` |
