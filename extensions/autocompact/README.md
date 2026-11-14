@@ -25,25 +25,24 @@ Add to `~/.pi/agent/settings.json` (or `PI_CODING_AGENT_DIR/settings.json`), or 
 
 ## Cache lifetimes
 
-Newer OpenAI/ChatGPT models work **without manual TTL setup**. When the requested `promptCache` tier is missing, the extension supplies these local scheduling defaults:
+**Any model without a configured lifetime for the active `promptCache` tier uses a 30-minute fallback**, including DeepSeek, older GPT/Codex models, OpenRouter, Azure, custom providers, proxies, and unknown model aliases. With the safety margin, idle compaction starts after **29 minutes** from request submission.
 
-| Models / request                                                                       | Assumed cache lifetime                 | Compact after  |
-| -------------------------------------------------------------------------------------- | -------------------------------------- | -------------- |
-| GPT-5.6 and GPT-6.x, including **GPT-6.1 Sol**, on `openai` or `openai-codex`          | **30 minutes**                         | **29 minutes** |
-| GPT-5.5 / GPT-5.5 Pro on those providers                                               | 30 minutes                             | 29 minutes     |
-| Older GPT-5.x / Codex models                                                           | 5 minutes                              | 4m30s          |
-| Direct OpenAI API with explicit `prompt_cache_options.ttl: "12h"` on GPT-5.6 / GPT-6.x | 12 hours                               | 11h59m         |
-| Older direct OpenAI API models explicitly requesting `prompt_cache_retention: "24h"`   | 30 minutes (not a guaranteed 24 hours) | 29 minutes     |
+This is an **arbitrary local scheduling estimate, not a provider cache-retention guarantee**. A provider's cache may expire earlier, so compaction can incur a cold request. `/autocompact status` labels the generic fallback `default (estimate)`; recognized direct OpenAI and ChatGPT/Codex models retain the `OpenAI default` and `Codex default (estimate)` labels.
 
-These are **extension defaults, not metadata supplied by the catalog**. The API values follow [OpenAI's prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching#cache-lifetime): GPT-5.6+ has a 30-minute default; earlier in-memory entries typically survive 5–10 minutes, and extended retention typically survives around 30 minutes, up to 24 hours.
+Explicit retention settings on recognized direct OpenAI GPT-5/6 endpoints still take precedence over the fallback when metadata is missing:
 
-**ChatGPT/Codex caveat:** the guide documents the public API, not a separate retention guarantee for ChatGPT subscription access. `openai-codex` uses the model-family values above as **best-effort scheduling estimates**, labeled `Codex default (estimate)` in `/autocompact status`. It does not claim a guaranteed eviction time. `PI_CACHE_RETENTION=long` alone does not extend this estimate, since Pi's Codex adapter does not send a retention duration.
+| Request                                                | Assumed cache lifetime                 | Compact after |
+| ------------------------------------------------------ | -------------------------------------- | ------------- |
+| `prompt_cache_options.ttl: "12h"` on GPT-5.6 / GPT-6.x | 12 hours                               | 11h59m        |
+| `prompt_cache_options.ttl: "30m"` on GPT-5.6 / GPT-6.x | 30 minutes                             | 29 minutes    |
+| `prompt_cache_retention: "24h"` on older GPT-5.x       | 30 minutes (not a guaranteed 24 hours) | 29 minutes    |
+| `prompt_cache_retention: "in_memory"` on older GPT-5.x | 5 minutes                              | 4m30s         |
 
-Defaults apply only to recognized GPT-5/6 model families on Pi's direct `https://api.openai.com/v1` or `https://chatgpt.com/backend-api` providers. They are not automatically applied to OpenRouter, Azure, custom providers, proxy URLs, unknown aliases, or other model families.
+These request-specific rules follow [OpenAI's prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching#cache-lifetime) and are not transferred to proxies or other providers. `PI_CACHE_RETENTION=long` alone does not extend the fallback. ChatGPT/Codex does not send a retention duration and always uses a best-effort estimate when metadata is missing.
 
-A declared positive `promptCache.short` or `promptCache.long` lifetime **in seconds** takes precedence for that tier. This includes catalog metadata and your `modelOverrides`. An omitted tier may use a built-in fallback; an explicitly invalid value is not silently replaced. The extension never modifies the catalog or your model configuration. `/autocompact status` reports whether it used model metadata, an OpenAI default, or a Codex estimate.
+A declared positive `promptCache.short` or `promptCache.long` lifetime **in seconds** takes precedence for that tier. This includes catalog metadata and your `modelOverrides`. An omitted tier uses the fallback; an explicitly invalid value is not silently replaced. The extension never modifies the catalog or your model configuration. `/autocompact status` reports the lifetime's source.
 
-For unsupported endpoints/models, or to override a default, use Pi's existing `modelOverrides` in `~/.pi/agent/models.json`. For example, for your ChatGPT/Codex model:
+To override a default, use Pi's existing `modelOverrides` in `~/.pi/agent/models.json`. For example, for your ChatGPT/Codex model:
 
 ```json
 {
@@ -59,7 +58,7 @@ For unsupported endpoints/models, or to override a default, use Pi's existing `m
 }
 ```
 
-This example is optional: it repeats the built-in GPT-6.1 Sol estimate. Use the actual model/provider ID and a lifetime appropriate to **that endpoint**. For a documented range, choose its conservative lower end. Without metadata or an applicable default, autocompact stays enabled but waits; `/autocompact status` explains why.
+This example is optional: it repeats the 30-minute fallback. Use the actual model/provider ID and a lifetime appropriate to **that endpoint**. For a documented range, choose its conservative lower end. Invalid metadata, cache-disabled requests, and Anthropic requests without cache breakpoints still skip scheduling; `/autocompact status` explains when no usable lifetime is available.
 
 The extension reads the outgoing payload's retention settings when present, otherwise `PI_CACHE_RETENTION` (`long` or the default `short`). Cache-disabled OpenAI explicit-only requests are skipped. Mixed Anthropic breakpoints use the shorter tier.
 

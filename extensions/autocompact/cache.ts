@@ -9,26 +9,36 @@ const record = (value: unknown): RecordValue | undefined =>
 
 export interface CacheLifetime {
   ttlMs: number;
-  source: "model metadata" | "OpenAI default" | "Codex default (estimate)";
+  source:
+    | "model metadata"
+    | "OpenAI default"
+    | "Codex default (estimate)"
+    | "default (estimate)";
 }
 
-/** Defaults are local scheduling policy, not metadata published by the catalog.
+const DEFAULT_LIFETIME: CacheLifetime = {
+  ttlMs: 30 * 60 * 1000,
+  source: "default (estimate)",
+};
+
+/** Local scheduling policy, not a provider cache-retention guarantee.
+ * Explicit direct OpenAI retention is scoped to recognized models/endpoints:
  * https://developers.openai.com/api/docs/guides/prompt-caching#cache-lifetime
- * ChatGPT/Codex uses the same model-family estimates, not an endpoint SLA.
  */
-function openAiDefault(
+function defaultCacheLifetime(
   model: Model<any>,
   body: RecordValue | undefined,
 ): CacheLifetime | undefined {
   const generation = /^gpt-(5|6)(?:\.(\d+))?(?:-|$)/.exec(model.id);
-  if (!generation) return undefined;
+  if (!generation) return DEFAULT_LIFETIME;
   let url: URL;
   try {
     url = new URL(model.baseUrl);
   } catch {
-    return undefined;
+    return DEFAULT_LIFETIME;
   }
-  if (url.username || url.password || url.search || url.hash) return undefined;
+  if (url.username || url.password || url.search || url.hash)
+    return DEFAULT_LIFETIME;
   const path = url.pathname.replace(/\/+$/, "");
   const codex =
     model.provider === "openai-codex" &&
@@ -44,12 +54,12 @@ function openAiDefault(
     ["openai-responses", "openai-completions"].includes(model.api) &&
     url.origin === "https://api.openai.com" &&
     path === "/v1";
-  if (!codex && !openai) return undefined;
+  if (!codex && !openai) return DEFAULT_LIFETIME;
 
   const major = Number(generation[1]);
   const minor = Number(generation[2] ?? 0);
   const modern = major === 6 || minor >= 6;
-  let seconds = modern || minor === 5 ? 1800 : 300;
+  let seconds = DEFAULT_LIFETIME.ttlMs / 1000;
   if (openai) {
     const ttl = record(body?.prompt_cache_options)?.ttl;
     if (ttl !== undefined) {
@@ -70,7 +80,7 @@ function openAiDefault(
   };
 }
 
-/** Declared metadata takes precedence; otherwise use scoped OpenAI/Codex defaults. */
+/** Declared metadata takes precedence; missing tiers use a 30-minute estimate. */
 export function resolveCacheLifetime(
   model: Model<any>,
   payload: unknown,
@@ -109,7 +119,7 @@ export function resolveCacheLifetime(
   if (model.api === "anthropic-messages" && controls.length === 0)
     return undefined;
   const seconds = model.promptCache?.[tier];
-  if (seconds === undefined) return openAiDefault(model, body);
+  if (seconds === undefined) return defaultCacheLifetime(model, body);
   const milliseconds = typeof seconds === "number" ? seconds * 1000 : NaN;
   return Number.isFinite(milliseconds) && milliseconds > 0
     ? { ttlMs: milliseconds, source: "model metadata" }

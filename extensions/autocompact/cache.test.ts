@@ -24,7 +24,7 @@ function codex(id = "gpt-6.1-sol"): Model<any> {
   };
 }
 
-describe("built-in OpenAI/ChatGPT cache defaults", () => {
+describe("cache defaults", () => {
   it.each([
     "gpt-5.5",
     "gpt-5.5-pro",
@@ -62,9 +62,9 @@ describe("built-in OpenAI/ChatGPT cache defaults", () => {
     "gpt-5.3-codex",
     "gpt-5.3-codex-spark",
     "gpt-5.4",
-  ])("uses a conservative five-minute default for older %s", (id) => {
-    expect(cacheLifetimeMs(openai(id), {})).toBe(300_000);
-    expect(cacheLifetimeMs(codex(id), {})).toBe(300_000);
+  ])("uses a 30-minute default for older %s", (id) => {
+    expect(cacheLifetimeMs(openai(id), {})).toBe(1_800_000);
+    expect(cacheLifetimeMs(codex(id), {})).toBe(1_800_000);
   });
 
   it("honors actual API retention without treating a 24h upper bound as a TTL", () => {
@@ -85,7 +85,7 @@ describe("built-in OpenAI/ChatGPT cache defaults", () => {
     // An environment tier does not prove the provider actually requested 12h.
     expect(cacheLifetimeMs(openai(), {}, "long")).toBe(1_800_000);
     expect(cacheLifetimeMs(codex(), {}, "long")).toBe(1_800_000);
-    expect(cacheLifetimeMs(codex("gpt-5.3-codex"), {}, "long")).toBe(300_000);
+    expect(cacheLifetimeMs(codex("gpt-5.3-codex"), {}, "long")).toBe(1_800_000);
   });
 
   it("prioritizes catalog/override metadata per tier without mutating the model", () => {
@@ -119,7 +119,6 @@ describe("built-in OpenAI/ChatGPT cache defaults", () => {
     { provider: "openrouter" },
     { provider: "azure" },
     { provider: "custom" },
-    { api: "anthropic-messages" },
     { baseUrl: "https://proxy.example/v1" },
     { baseUrl: "https://api.openai.com.evil.example/v1" },
     { baseUrl: "http://api.openai.com/v1" },
@@ -128,9 +127,17 @@ describe("built-in OpenAI/ChatGPT cache defaults", () => {
     { baseUrl: "https://user:secret@api.openai.com/v1" },
     { baseUrl: "https://api.openai.com/v1?upstream=elsewhere" },
     { baseUrl: "not a URL" },
-  ])("does not transfer OpenAI defaults to %j", (overrides) => {
-    expect(cacheLifetimeMs({ ...openai(), ...overrides }, {})).toBeUndefined();
-  });
+  ])(
+    "uses a generic estimate rather than OpenAI policy for %j",
+    (overrides) => {
+      expect(
+        resolveCacheLifetime(
+          { ...openai(), ...overrides },
+          { prompt_cache_options: { ttl: "12h" } },
+        ),
+      ).toEqual({ ttlMs: 1_800_000, source: "default (estimate)" });
+    },
+  );
 
   it.each([
     { provider: "custom" },
@@ -138,8 +145,11 @@ describe("built-in OpenAI/ChatGPT cache defaults", () => {
     { baseUrl: "https://proxy.example/backend-api" },
     { baseUrl: "https://chatgpt.com.evil.example/backend-api" },
     { baseUrl: "https://chatgpt.com/other-api" },
-  ])("does not transfer Codex estimates to %j", (overrides) => {
-    expect(cacheLifetimeMs({ ...codex(), ...overrides }, {})).toBeUndefined();
+  ])("uses a generic estimate rather than Codex policy for %j", (overrides) => {
+    expect(resolveCacheLifetime({ ...codex(), ...overrides }, {})).toEqual({
+      ttlMs: 1_800_000,
+      source: "default (estimate)",
+    });
   });
 
   it.each([
@@ -151,9 +161,51 @@ describe("built-in OpenAI/ChatGPT cache defaults", () => {
     "chat-latest",
     "some-future-model",
   ])("does not infer a model family from %s", (id) => {
-    expect(cacheLifetimeMs(openai(id), {})).toBeUndefined();
-    expect(cacheLifetimeMs(codex(id), {})).toBeUndefined();
+    for (const model of [openai(id), codex(id)]) {
+      expect(resolveCacheLifetime(model, {})).toEqual({
+        ttlMs: 1_800_000,
+        source: "default (estimate)",
+      });
+    }
   });
+
+  it.each(["short", "long"])(
+    "uses a 30-minute estimate for DeepSeek's missing %s tier",
+    (tier) => {
+      const model = {
+        ...openai("deepseek-chat"),
+        provider: "deepseek",
+        api: "openai-completions",
+        baseUrl: "https://api.deepseek.com",
+      } as Model<any>;
+      expect(resolveCacheLifetime(model, {}, tier)).toEqual({
+        ttlMs: 1_800_000,
+        source: "default (estimate)",
+      });
+      expect(compactionDelayMs(cacheLifetimeMs(model, {}, tier)!)).toBe(
+        1_740_000,
+      );
+      expect(
+        resolveCacheLifetime(
+          { ...model, promptCache: { short: 600 } },
+          {},
+          "short",
+        ),
+      ).toEqual({ ttlMs: 600_000, source: "model metadata" });
+      expect(
+        resolveCacheLifetime(
+          { ...model, promptCache: { short: 0 } },
+          {},
+          "short",
+        ),
+      ).toBeUndefined();
+      expect(
+        resolveCacheLifetime(model, {
+          prompt_cache_options: { mode: "explicit" },
+        }),
+      ).toBeUndefined();
+    },
+  );
 
   it("still allows explicit metadata for proxies and custom models", () => {
     expect(

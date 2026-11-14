@@ -171,9 +171,9 @@ describe("cache policy", () => {
     },
   );
 
-  it("does not guess missing tier metadata or schedule timers too close to expiry", () => {
-    expect(cacheLifetimeMs(model({}), {})).toBeUndefined();
-    expect(cacheLifetimeMs(model({ short: 300 }), {}, "long")).toBeUndefined();
+  it("defaults missing tiers to 30 minutes but does not schedule too close to expiry", () => {
+    expect(cacheLifetimeMs(model({}), {})).toBe(1_800_000);
+    expect(cacheLifetimeMs(model({ short: 300 }), {}, "long")).toBe(1_800_000);
     expect(compactionDelayMs(10_000)).toBeUndefined();
     expect(compactionDelayMs(300_000)).toBe(270_000);
     expect(compactionDelayMs(3_600_000)).toBe(3_540_000);
@@ -343,19 +343,46 @@ describe("autocompact", () => {
     },
   );
 
-  it("does not infer a lifetime for a missing tier", async () => {
+  it("uses the 30-minute fallback for a missing tier and compacts only once", async () => {
     const h = harness(true);
     h.ctx.model = model({});
     await h.start();
     await h.run();
     await h.command("status");
     expect(h.notify).toHaveBeenLastCalledWith(
-      expect.stringContaining("no usable cache lifetime"),
+      expect.stringContaining("cache TTL 1800s; default (estimate)"),
       "info",
     );
-    await vi.advanceTimersByTimeAsync(3_600_000);
+    await vi.advanceTimersByTimeAsync(1_739_999);
     expect(h.compact).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.compact).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(h.compact).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    { promptCache: { short: 0 }, payload: {} },
+    {
+      promptCache: {},
+      payload: { prompt_cache_options: { mode: "explicit" } },
+    },
+  ])(
+    "does not schedule for invalid metadata or disabled caching: %j",
+    async ({ promptCache, payload }) => {
+      const h = harness(true);
+      h.ctx.model = model(promptCache);
+      await h.start();
+      await h.run(0, "stop", payload);
+      await h.command("status");
+      expect(h.notify).toHaveBeenLastCalledWith(
+        expect.stringContaining("no usable cache lifetime"),
+        "info",
+      );
+      await vi.advanceTimersByTimeAsync(3_600_000);
+      expect(h.compact).not.toHaveBeenCalled();
+    },
+  );
 
   it("turning off cancels the pending timer", async () => {
     const h = harness(true);

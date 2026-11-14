@@ -47,6 +47,7 @@ async function createHarness(
     manager?: SessionManager;
     enabled?: boolean;
     codex?: boolean;
+    deepseek?: boolean;
   } = {},
 ) {
   const manager = options.manager ?? SessionManager.inMemory(cwd);
@@ -56,9 +57,17 @@ async function createHarness(
         api: "openai-codex-responses",
         models: [{ id: "gpt-6.1-sol" }],
       })
-    : fauxProvider();
+    : options.deepseek
+      ? fauxProvider({
+          provider: "deepseek",
+          api: "openai-completions",
+          models: [{ id: "deepseek-chat" }],
+        })
+      : fauxProvider();
   if (options.codex)
     faux.getModel().baseUrl = "https://chatgpt.com/backend-api";
+  else if (options.deepseek)
+    faux.getModel().baseUrl = "https://api.deepseek.com";
   else faux.getModel().promptCache = { short: 15 };
   // Faux emits responses but has no wire payload. Exercise the actual SDK
   // onPayload -> before_provider_request path rather than mocking the runner.
@@ -136,26 +145,29 @@ function userMessages(session: AgentSession): string[] {
 }
 
 describe("autocompact through Pi's real runtime", () => {
-  it("compacts newer Codex models without any promptCache override", async () => {
-    const { session, manager, faux } = await createHarness({
-      codex: true,
-      extensions: [summary],
-    });
-    expect(session.model?.promptCache).toBeUndefined();
-    faux.setResponses([fauxAssistantMessage("Done.")]);
-    await session.prompt("Work on this task.");
-    await session.prompt("/autocompact on");
-    await vi.advanceTimersByTimeAsync(1_739_999);
-    expect(
-      manager.getEntries().some((entry) => entry.type === "compaction"),
-    ).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(
-      manager.getEntries().filter((entry) => entry.type === "compaction"),
-    ).toHaveLength(1);
-    expect(faux.state.callCount).toBe(1);
-    expect(session.model?.promptCache).toBeUndefined();
-  });
+  it.each(["codex", "deepseek"] as const)(
+    "compacts %s without any promptCache override",
+    async (provider) => {
+      const { session, manager, faux } = await createHarness({
+        [provider]: true,
+        extensions: [summary],
+      });
+      expect(session.model?.promptCache).toBeUndefined();
+      faux.setResponses([fauxAssistantMessage("Done.")]);
+      await session.prompt("Work on this task.");
+      await session.prompt("/autocompact on");
+      await vi.advanceTimersByTimeAsync(1_739_999);
+      expect(
+        manager.getEntries().some((entry) => entry.type === "compaction"),
+      ).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(
+        manager.getEntries().filter((entry) => entry.type === "compaction"),
+      ).toHaveLength(1);
+      expect(faux.state.callCount).toBe(1);
+      expect(session.model?.promptCache).toBeUndefined();
+    },
+  );
 
   it("dispatches native compaction, not literal slash-command text, and rearms only after real work", async () => {
     const { session, manager, faux } = await createHarness({
