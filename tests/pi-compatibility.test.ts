@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const activeExtensions = [
+  "autocompact",
   "background-command",
   "clear-command",
   "file-command",

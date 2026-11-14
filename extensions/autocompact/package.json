@@ -1,0 +1,12 @@
+{
+  "name": "@dpchamps/pi-autocompact",
+  "version": "0.1.0",
+  "description": "Opt-in idle compaction before the session prompt cache expires",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.3.0",
+    "@earendil-works/pi-ai": "^1.3.0"
+  }
+}
