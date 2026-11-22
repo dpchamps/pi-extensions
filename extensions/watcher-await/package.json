@@ -1,0 +1,12 @@
+{
+  "name": "@dpchamps/pi-watcher-await",
+  "version": "0.1.0",
+  "description": "Pi extension: supervised background shell jobs with completion notifications",
+  "author": "dpchamps",
+  "license": "MIT",
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.3.0",
+    "typebox": "^1.3.27"
+  }
+}

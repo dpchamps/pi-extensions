@@ -28,6 +28,7 @@ const activeExtensions = [
   "scratchpad",
   "shell-command",
   "task",
+  "watcher-await",
   "web-fetch-tool",
   "worktree-command",
 ];

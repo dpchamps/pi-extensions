@@ -28,6 +28,7 @@ The compatibility tests load every active extension through Pi. Scratchpad tests
 | [scratchpad](./extensions/scratchpad/) | Extension | Session-scoped temporary files; restores guidance only when missing from outgoing context |
 | [shell-command](./extensions/shell-command/) | Extension (command) | `/shell` — fresh interactive shell; exit silently back to Pi |
 | [task](./extensions/task/) | Extension (command) | `/task` — oracle, focus, and independently verified goal loops with flag-based arguments |
+| [watcher-await](./extensions/watcher-await/) | Extension (tool) | Agent-launched background shell jobs with completion notices and a keyboard job picker |
 | [web-fetch-tool](./extensions/web-fetch-tool/) | Extension (tool) | Fetch URLs and extract structured content from webpages and supported domains |
 | [worktree-command](./extensions/worktree-command/) | Extension (command) | `/worktree` — fork branch into `.worktrees/`, switch/merge/cleanup, with autocomplete |
 
