@@ -5,7 +5,7 @@ import type {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import taskExtension from "./index.js";
 import type { GoalChecker } from "./goal-checker.js";
-import type { Component } from "@earendil-works/pi-tui";
+import { getKeybindings, type Component } from "@earendil-works/pi-tui";
 
 type EventHandler = (event: any, ctx: ExtensionContext) => unknown;
 
@@ -35,6 +35,7 @@ function createHarness(options: Parameters<typeof taskExtension>[1] = {}) {
         handler: (args: string, ctx: ExtensionContext) => Promise<void>;
       }
     | undefined;
+  const shortcuts = new Map<string, (ctx: ExtensionContext) => unknown>();
   const sendUserMessage = vi.fn();
   const exec = vi.fn();
 
@@ -46,6 +47,10 @@ function createHarness(options: Parameters<typeof taskExtension>[1] = {}) {
     registerCommand: (_name: string, registered: typeof command) => {
       command = registered;
     },
+    registerShortcut: (
+      key: string,
+      { handler }: { handler: (ctx: ExtensionContext) => unknown },
+    ) => shortcuts.set(key, handler),
     sendUserMessage,
     exec,
   } as unknown as ExtensionAPI;
@@ -54,14 +59,38 @@ function createHarness(options: Parameters<typeof taskExtension>[1] = {}) {
 
   const notify = vi.fn();
   const setStatus = vi.fn();
-  let widget: Component | undefined;
+  let overlay: Component | undefined;
   const requestRender = vi.fn();
-  const unsubscribeInput = vi.fn();
-  const onTerminalInput = vi.fn(() => unsubscribeInput);
   const theme = { fg: (_color: string, text: string) => text };
-  const setWidget = vi.fn((_key, factory) => {
-    widget = factory?.({ terminal: { rows: 30 }, requestRender }, theme);
-  });
+  const setWidget = vi.fn();
+  const custom = vi.fn(
+    (factory) =>
+      new Promise((resolve) => {
+        overlay = factory(
+          { terminal: { rows: 30 }, requestRender },
+          theme,
+          getKeybindings(),
+          (result: unknown) => {
+            overlay = undefined;
+            resolve(result);
+          },
+        );
+      }),
+  );
+  const select = vi.fn();
+  const input = vi.fn();
+  const editor = vi.fn();
+  const confirm = vi.fn();
+  const model = { provider: "test", id: "model", reasoning: true };
+  const getAvailable = vi.fn(() => [
+    model,
+    {
+      provider: "another",
+      id: "reviewer",
+      reasoning: true,
+      thinkingLevelMap: { low: null, xhigh: "xhigh" },
+    },
+  ]);
   const isIdle = vi.fn(() => true);
   const abort = vi.fn();
   const compact = vi.fn((compactOptions: { onComplete?: () => void }) =>
@@ -71,13 +100,18 @@ function createHarness(options: Parameters<typeof taskExtension>[1] = {}) {
     cwd: "/workspace",
     hasUI: true,
     mode: "tui",
-    model: { provider: "test", id: "model" },
+    model,
     thinkingLevel: "medium",
+    modelRegistry: { getAvailable },
     ui: {
       notify,
       setStatus,
       setWidget,
-      onTerminalInput,
+      custom,
+      select,
+      input,
+      editor,
+      confirm,
       theme,
     },
     getContextUsage: () => ({ tokens: 60, contextWindow: 100, percent: 60 }),
@@ -104,13 +138,187 @@ function createHarness(options: Parameters<typeof taskExtension>[1] = {}) {
     setWidget,
     isIdle,
     abort,
-    unsubscribeInput,
-    renderWidget: () => widget?.render(100).join("\n") ?? "",
+    custom,
+    select,
+    input,
+    editor,
+    confirm,
+    getAvailable,
+    key: (data: string) => overlay?.handleInput?.(data),
+    shortcut: (key: string) => shortcuts.get(key)?.(context),
+    renderOverlay: () => overlay?.render(100).join("\n") ?? "",
   };
 }
 
 beforeEach(() => {
   vi.restoreAllMocks();
+});
+
+const choose = (value: string) => (_title: string, options: string[]) =>
+  options.find(
+    (option) => option === value || option.startsWith(`${value} — `),
+  );
+
+describe("/task configure", () => {
+  it("explains each task type when invoked with no arguments", async () => {
+    const harness = createHarness();
+    await harness.command("");
+    expect(harness.select).toHaveBeenCalledExactlyOnceWith("Task type", [
+      "oracle — Keep working until a command passes (e.g. npm test)",
+      "focus — Keep exploring and iterating until you stop it or it reaches a run limit",
+      "goal — Keep working until a separate reviewer verifies the result",
+    ]);
+    expect(harness.sendUserMessage).not.toHaveBeenCalled();
+  });
+  it("searches reviewer models and only starts after confirming the multiline prompt", async () => {
+    const goalCheckerFactory = vi.fn(() => fakeChecker());
+    const harness = createHarness({ launchArgs: [], goalCheckerFactory });
+    const prompt =
+      "Fix the parser's escaping.\nKeep literal `\\n` and --flags intact.";
+    const approval = deferred<boolean>();
+    harness.select
+      .mockImplementationOnce(choose("goal"))
+      .mockImplementationOnce(choose("xhigh"));
+    harness.editor.mockResolvedValue(prompt);
+    harness.confirm.mockReturnValue(approval.promise);
+
+    const configuring = harness.command("configure");
+    await vi.waitFor(() =>
+      expect(harness.renderOverlay()).toContain("Goal reviewer model"),
+    );
+    expect(harness.renderOverlay()).toContain("Same as session (test/model)");
+    for (const key of "reviewer") harness.key(key);
+    expect(harness.renderOverlay()).not.toContain("Same as session");
+    expect(harness.renderOverlay()).toContain("another/reviewer");
+    harness.key("\r");
+    await vi.waitFor(() =>
+      expect(harness.select).toHaveBeenLastCalledWith(
+        "Goal reviewer thinking level",
+        [
+          "medium — Moderate reasoning",
+          "off — No reasoning",
+          "minimal — Very brief reasoning",
+          "high — Deep reasoning",
+          "xhigh — Extra-high reasoning",
+        ],
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(harness.confirm).toHaveBeenCalledWith(
+        "Start this task?",
+        `Type: goal\nReviewer: another/reviewer\nThinking level: xhigh\n\n${prompt}`,
+      ),
+    );
+    expect(goalCheckerFactory).not.toHaveBeenCalled();
+    expect(harness.sendUserMessage).not.toHaveBeenCalled();
+    approval.resolve(true);
+    await configuring;
+    await vi.waitFor(() =>
+      expect(harness.sendUserMessage).toHaveBeenCalledWith(prompt),
+    );
+    expect(goalCheckerFactory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: { provider: "another", id: "reviewer" },
+        thinkingLevel: "xhigh",
+        prompt,
+      }),
+    );
+    expect(harness.context.model).toMatchObject({
+      provider: "test",
+      id: "model",
+    });
+    expect(harness.context.thinkingLevel).toBe("medium");
+    await harness.command("cancel");
+  });
+
+  it.each([
+    ["oracle", "configure"],
+    ["focus", ""],
+  ])(
+    "confirms a configured %s task and skips model selection (/task %s)",
+    async (kind, args) => {
+      const harness = createHarness({ launchArgs: [] });
+      const verifier = 'printf "%s" "it\'s quoted"';
+      harness.select.mockImplementationOnce(choose(kind));
+      harness.input.mockResolvedValue(kind === "oracle" ? verifier : "1");
+      harness.editor.mockResolvedValue("Baseline prompt");
+      harness.confirm.mockResolvedValue(true);
+      harness.exec.mockResolvedValue({ code: 0, killed: false });
+      await harness.command(args);
+      expect(harness.getAvailable).not.toHaveBeenCalled();
+      expect(harness.sendUserMessage).toHaveBeenCalledWith("Baseline prompt");
+      await harness.emit("agent_settled", { aborted: false });
+      if (kind === "oracle")
+        expect(harness.exec).toHaveBeenCalledWith(
+          "bash",
+          ["-c", verifier],
+          expect.anything(),
+        );
+      else
+        expect(harness.notify).toHaveBeenLastCalledWith(
+          "Task focus: reached the limit of 1 run(s)",
+          "info",
+        );
+    },
+  );
+
+  it("does not start a task when confirmation is declined", async () => {
+    const harness = createHarness();
+    harness.select.mockImplementationOnce(choose("focus"));
+    harness.input.mockResolvedValue("");
+    harness.editor.mockResolvedValue("Don't execute");
+    harness.confirm.mockResolvedValue(false);
+    await harness.command("configure");
+    expect(harness.sendUserMessage).not.toHaveBeenCalled();
+    await harness.command("--focus another prompt");
+    expect(harness.sendUserMessage).toHaveBeenCalledExactlyOnceWith(
+      "another prompt",
+    );
+  });
+
+  it("keeps the session model available in the RPC picker", async () => {
+    const goalCheckerFactory = vi.fn(() => fakeChecker());
+    const harness = createHarness({ launchArgs: [], goalCheckerFactory });
+    Object.assign(harness.context, { mode: "rpc" });
+    harness.select
+      .mockImplementationOnce(choose("goal"))
+      .mockResolvedValueOnce("Same as session (test/model)")
+      .mockImplementationOnce(choose("low"));
+    harness.editor.mockResolvedValue("Goal prompt");
+    harness.confirm.mockResolvedValue(true);
+    await harness.command("configure");
+    expect(harness.select).toHaveBeenNthCalledWith(2, "Goal reviewer model", [
+      "Same as session (test/model)",
+      "another/reviewer",
+    ]);
+    expect(goalCheckerFactory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: { provider: "test", id: "model" },
+        thinkingLevel: "low",
+      }),
+    );
+    expect(harness.custom).not.toHaveBeenCalled();
+    await harness.command("cancel");
+  });
+
+  it("offers only off for a non-reasoning reviewer and exits if the choice is cancelled", async () => {
+    const goalCheckerFactory = vi.fn(() => fakeChecker());
+    const harness = createHarness({ launchArgs: [], goalCheckerFactory });
+    Object.assign(harness.context, { mode: "rpc" });
+    harness.getAvailable.mockReturnValue([
+      { provider: "another", id: "reviewer", reasoning: false },
+    ]);
+    harness.select
+      .mockImplementationOnce(choose("goal"))
+      .mockResolvedValueOnce("another/reviewer");
+    await harness.command("configure");
+    expect(harness.select).toHaveBeenLastCalledWith(
+      "Goal reviewer thinking level",
+      ["off — No reasoning"],
+    );
+    expect(harness.editor).not.toHaveBeenCalled();
+    expect(goalCheckerFactory).not.toHaveBeenCalled();
+  });
 });
 
 describe("task loops", () => {
@@ -230,13 +438,20 @@ describe("task loops", () => {
     harness.sendUserMessage.mockImplementation(() => order.push("send"));
 
     await harness.command("--goal implement checkout");
-    expect(order.slice(0, 2)).toEqual(["initialize", "send"]);
-    expect(harness.setWidget).toHaveBeenCalledWith(
-      "task-goal-stream",
-      expect.any(Function),
+    await vi.waitFor(() =>
+      expect(order.slice(0, 2)).toEqual(["initialize", "send"]),
     );
-    expect(harness.renderWidget()).toContain("Goal planner (live)");
-    expect(harness.renderWidget()).toContain("- [ ] Run integration tests");
+    expect(harness.setWidget).not.toHaveBeenCalled();
+    expect(harness.custom).not.toHaveBeenCalled();
+    expect(harness.setStatus).toHaveBeenLastCalledWith(
+      "task",
+      expect.stringContaining("Ctrl+Alt+R reviewer"),
+    );
+    const viewing = harness.command("reviewer");
+    expect(harness.renderOverlay()).toContain("Goal planner (following)");
+    expect(harness.renderOverlay()).toContain("- [ ] Run integration tests");
+    harness.key("\x1b");
+    await viewing;
 
     await harness.emit("agent_settled", { aborted: false });
     expect(order).toContain("evaluate-incomplete");
@@ -245,8 +460,8 @@ describe("task loops", () => {
     );
 
     await harness.emit("agent_settled", { aborted: false });
+    await vi.waitFor(() => expect(checker.dispose).toHaveBeenCalledOnce());
     expect(order).toContain("evaluate-complete");
-    expect(checker.dispose).toHaveBeenCalledOnce();
     expect(harness.notify).toHaveBeenLastCalledWith(
       "Task goal: independently verified after 2 run(s)",
       "info",
@@ -380,15 +595,20 @@ describe("task loops", () => {
       launchArgs: [],
       goalCheckerFactory: () => checker,
     });
-    const starting = harness.command("--goal original goal");
-    await vi.waitFor(() => expect(checker.initialize).toHaveBeenCalledOnce());
+    await harness.command("--goal original goal");
+    expect(checker.initialize).toHaveBeenCalledOnce();
     await harness.emit("input", { source: "interactive" });
     await harness.emit("agent_settled", { aborted: false });
     expect(checker.evaluate).not.toHaveBeenCalled();
     expect(checker.dispose).not.toHaveBeenCalled();
     harness.isIdle.mockReturnValue(false);
     initialized.resolve();
-    await starting;
+    await vi.waitFor(() =>
+      expect(harness.setStatus).toHaveBeenLastCalledWith(
+        "task",
+        expect.stringContaining("task goal 1"),
+      ),
+    );
     expect(harness.sendUserMessage).not.toHaveBeenCalled();
     harness.isIdle.mockReturnValue(true);
     await harness.emit("agent_settled", { aborted: false });
@@ -413,24 +633,23 @@ describe("task loops", () => {
         launchArgs: [],
         goalCheckerFactory: () => checker,
       });
-      const starting = harness.command("--goal implement feature");
-      let pending = starting;
+      await harness.command("--goal implement feature");
       if (phase === "checking") {
-        await starting;
-        pending = harness.emit("agent_settled", { aborted: false });
+        await vi.waitFor(() =>
+          expect(harness.sendUserMessage).toHaveBeenCalledOnce(),
+        );
+        await harness.emit("agent_settled", { aborted: false });
       }
-      await vi.waitFor(() => expect(block).toHaveBeenCalledOnce());
+      expect(block).toHaveBeenCalledOnce();
       const sent = harness.sendUserMessage.mock.calls.length;
+      const viewing = harness.shortcut("ctrl+alt+r");
+      expect(harness.renderOverlay()).not.toBe("");
       await harness.command("cancel");
+      await viewing;
       expect(signal?.aborted).toBe(true);
       expect(checker.dispose).toHaveBeenCalledOnce();
-      expect(harness.unsubscribeInput).toHaveBeenCalledOnce();
-      expect(harness.setWidget).toHaveBeenLastCalledWith(
-        "task-goal-stream",
-        undefined,
-      );
+      expect(harness.renderOverlay()).toBe("");
       operation.resolve({ complete: false, feedback: "Late result" });
-      await pending;
       await harness.emit("agent_settled", { aborted: false });
       expect(harness.sendUserMessage).toHaveBeenCalledTimes(sent);
     },
@@ -445,13 +664,21 @@ describe("task loops", () => {
       goalCheckerFactory: () => checker,
     });
     await harness.command("--goal original goal");
-    const settling = harness.emit("agent_settled", { aborted: false });
+    await vi.waitFor(() =>
+      expect(harness.sendUserMessage).toHaveBeenCalledOnce(),
+    );
+    await harness.emit("agent_settled", { aborted: false });
     await harness.emit("input", { source: "interactive" });
     await harness.emit("agent_settled", { aborted: false });
     expect(checker.evaluate).toHaveBeenCalledOnce();
     harness.isIdle.mockReturnValue(false);
     evaluated.resolve({ complete: false, feedback: "Gap to address" });
-    await settling;
+    await vi.waitFor(() =>
+      expect(harness.setStatus).toHaveBeenLastCalledWith(
+        "task",
+        expect.stringContaining("task goal 2"),
+      ),
+    );
     expect(harness.sendUserMessage).toHaveBeenCalledTimes(1);
     harness.isIdle.mockReturnValue(true);
     await harness.emit("agent_settled", { aborted: false });
@@ -480,9 +707,12 @@ describe("task loops", () => {
       goalCheckerFactory: () => checker,
     });
     await harness.command("--goal implement feature");
+    const viewing = harness.command("reviewer");
+    expect(harness.renderOverlay()).not.toBe("");
     await harness.emit("session_shutdown");
     await harness.emit("session_shutdown");
+    await viewing;
     expect(checker.dispose).toHaveBeenCalledOnce();
-    expect(harness.unsubscribeInput).toHaveBeenCalledOnce();
+    expect(harness.renderOverlay()).toBe("");
   });
 });

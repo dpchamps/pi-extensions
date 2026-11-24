@@ -78,6 +78,13 @@ function parseKind(value: string): TaskKind | undefined {
     : undefined;
 }
 
+export function parseTaskLimit(value: string): number | undefined {
+  const limit = Number(value);
+  return /^\d+$/.test(value) && Number.isSafeInteger(limit) && limit > 0
+    ? limit
+    : undefined;
+}
+
 export function parseTaskArgs(input: string): TaskArgsResult {
   const tokenized = tokenize(input.trim());
   if (tokenized.error) return { ok: false, error: tokenized.error };
@@ -169,9 +176,9 @@ export function parseTaskArgs(input: string): TaskArgsResult {
         const taken = takeValue(name, inline, index);
         if (taken.error) return { ok: false, error: taken.error };
         index = taken.next;
-        if (!/^\d+$/.test(taken.value!) || Number(taken.value) < 1)
+        limit = parseTaskLimit(taken.value!);
+        if (limit === undefined)
           return { ok: false, error: "--limit must be a positive integer" };
-        limit = Number(taken.value);
         continue;
       }
       return { ok: false, error: `unknown flag ${JSON.stringify(rawName)}` };

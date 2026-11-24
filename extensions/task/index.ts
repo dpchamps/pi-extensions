@@ -2,18 +2,15 @@
  * /task runs one of three event-driven autonomous loops:
  * - oracle: an external command decides whether work is complete
  * - focus: repeatedly asks the agent to keep exploring
- * - goal: an independent same-model checker verifies a private checklist
+ * - goal: an independent reviewer verifies a private checklist
  */
 
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import {
-  parseTaskArgs,
-  type ParsedTaskArgs,
-  type TaskKind,
-} from "./arguments.js";
+import { parseTaskArgs, type TaskKind } from "./arguments.js";
+import { configureTask, modelLabel, type TaskRequest } from "./configure.js";
 import {
   createGoalChecker,
   type GoalChecker,
@@ -21,6 +18,8 @@ import {
 } from "./goal-checker.js";
 import {
   createGoalStreamDisplay,
+  REVIEWER_KEY_HINT,
+  REVIEWER_SHORTCUT,
   type GoalStreamDisplay,
 } from "./goal-output.js";
 import { inheritedArgs } from "../background-command/launch.js";
@@ -31,9 +30,11 @@ const MAX_FEEDBACK_LENGTH = 8000;
 
 const USAGE = [
   "Task usage:",
+  "  /task [configure]                                    # configure and start a task",
   '  /task --verify "<command>" <prompt>                    # oracle (default)',
   "  /task --focus [--limit <runs>] <prompt>",
   "  /task --goal <prompt>",
+  `  /task reviewer                                       # open reviewer output (${REVIEWER_KEY_HINT})`,
   "  /task cancel                                         # cancel the active task",
 ].join("\n");
 
@@ -98,7 +99,7 @@ function goalContinuation(prompt: string, feedback: string): string {
   ].join("\n");
 }
 
-function makeTask(parsed: ParsedTaskArgs): ActiveTask {
+function makeTask(parsed: TaskRequest): ActiveTask {
   const base = {
     prompt: parsed.prompt,
     runs: 0,
@@ -130,6 +131,7 @@ export default function taskExtension(
   const goalCheckerFactory = options.goalCheckerFactory ?? createGoalChecker;
   let startupProvider: string | undefined;
   let task: ActiveTask | null = null;
+  let configuration: object | undefined;
 
   const notify = (
     ctx: ExtensionContext,
@@ -146,6 +148,12 @@ export default function taskExtension(
       text === undefined ? undefined : ctx.ui.theme.fg("accent", text),
     );
   };
+
+  const reviewerStatus = (ctx: ExtensionContext, phase: string) =>
+    setStatus(
+      ctx,
+      `↻ task goal ${phase}${ctx.mode === "tui" ? ` · ${REVIEWER_KEY_HINT} reviewer` : ""}`,
+    );
 
   const dispose = (active: ActiveTask) => {
     active.controller.abort();
@@ -172,7 +180,10 @@ export default function taskExtension(
     ctx: ExtensionContext,
     active: ActiveTask,
     run: number,
-  ) => setStatus(ctx, `↻ task ${active.kind} ${runLabel(active, run)}`);
+  ) => {
+    if (active.kind === "goal") reviewerStatus(ctx, runLabel(active, run));
+    else setStatus(ctx, `↻ task ${active.kind} ${runLabel(active, run)}`);
+  };
 
   const compactFocus = async (
     ctx: ExtensionContext,
@@ -300,7 +311,7 @@ export default function taskExtension(
       return;
     }
     active.phase = "checking";
-    setStatus(ctx, `↻ task goal checking (${active.runs})`);
+    reviewerStatus(ctx, `checking (${active.runs})`);
     try {
       const decision = await active.checker.evaluate(active.controller.signal);
       if (task !== active) return;
@@ -330,7 +341,7 @@ export default function taskExtension(
     }
   };
 
-  pi.on("agent_settled", async (event, ctx) => {
+  pi.on("agent_settled", (event, ctx) => {
     const active = task;
     // Ignore incidental chat runs during planning and serialize verification
     // across runs, including when chat finishes during a checker operation.
@@ -345,24 +356,152 @@ export default function taskExtension(
       return;
     }
     active.settling = true;
-    try {
-      await settleTask(ctx, active, event.aborted);
-    } finally {
+    const settling = settleTask(ctx, active, event.aborted).finally(() => {
       active.settling = false;
+    });
+    // Pi defers prompt/command input until agent_settled handlers finish. Let
+    // interactive/RPC sessions accept chat and /task cancel during review.
+    if (active.kind === "goal" && ctx.hasUI) {
+      void settling.catch((error) => {
+        stop(ctx, active, `Task goal: ${String(error)}`, "error");
+      });
+      return;
     }
+    return settling;
   });
 
   pi.on("session_shutdown", () => {
+    configuration = undefined;
     const active = task;
     task = null;
     if (active) dispose(active);
   });
 
+  const showReviewer = async (ctx: ExtensionContext, warn = false) => {
+    if (!ctx.hasUI || ctx.mode !== "tui") {
+      if (warn)
+        notify(ctx, "Task: the reviewer view needs a terminal UI.", "warning");
+      return;
+    }
+    if (task?.kind !== "goal" || !task.display) {
+      if (warn) notify(ctx, "Task: no goal reviewer is active.", "warning");
+      return;
+    }
+    await task.display.toggle();
+  };
+
+  pi.registerShortcut(REVIEWER_SHORTCUT, {
+    description: "Attach to or detach from goal reviewer output",
+    handler: (ctx) => showReviewer(ctx),
+  });
+
+  const startTask = (request: TaskRequest, ctx: ExtensionContext) => {
+    const active = makeTask(request);
+    task = active;
+
+    if (active.kind === "oracle") {
+      notify(
+        ctx,
+        `Task oracle: starting (verify: ${active.verify}). Use /task cancel to cancel.`,
+      );
+      setWorkingStatus(ctx, active, 1);
+      sendPrompt(ctx, active, active.prompt);
+      return;
+    }
+
+    if (active.kind === "focus") {
+      notify(
+        ctx,
+        `Task focus: starting${active.limit ? ` (limit ${active.limit} runs)` : ""}. Use /task cancel to cancel.`,
+      );
+      setWorkingStatus(ctx, active, 1);
+      sendPrompt(ctx, active, active.prompt);
+      return;
+    }
+
+    if (!ctx.model) {
+      stop(ctx, active, "Task goal: no active model is available", "error");
+      return;
+    }
+
+    const reviewer = request.reviewer ?? {
+      model: ctx.model,
+      thinkingLevel: ctx.thinkingLevel,
+    };
+    notify(
+      ctx,
+      `Task goal: ${modelLabel(reviewer.model)} will create an independent verification checklist before implementation starts. Use /task cancel to cancel.`,
+    );
+    reviewerStatus(ctx, "planning");
+    active.display = createGoalStreamDisplay(ctx);
+    const planning = startReviewer(ctx, active, reviewer);
+    // Return control to the interactive input loop immediately. In
+    // non-interactive modes keep the caller alive while planning runs.
+    if (!ctx.hasUI) return planning;
+    void planning;
+  };
+
+  const startReviewer = async (
+    ctx: ExtensionContext,
+    active: GoalTask,
+    { model, thinkingLevel }: NonNullable<TaskRequest["reviewer"]>,
+  ) => {
+    try {
+      const launchArgs =
+        options.launchArgs ??
+        inheritedArgs(launchArgv, launchCwd, model.provider, startupProvider);
+      const checker = await goalCheckerFactory({
+        cwd: ctx.cwd,
+        prompt: active.prompt,
+        model: { provider: model.provider, id: model.id },
+        thinkingLevel,
+        projectTrusted: ctx.isProjectTrusted(),
+        launchArgs,
+        onUpdate: (update) => active.display?.update(update),
+      });
+      if (task !== active) {
+        await checker.dispose();
+        return;
+      }
+      active.checker = checker;
+      await checker.initialize(active.controller.signal);
+      if (task !== active) return;
+      active.phase = "working";
+      setWorkingStatus(ctx, active, 1);
+      sendPrompt(ctx, active, active.prompt);
+    } catch (error) {
+      if (task === active)
+        stop(
+          ctx,
+          active,
+          `Task goal: could not initialize checker — ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+    }
+  };
+
   pi.registerCommand("task", {
     description:
-      "Run an oracle, focus, or independently checked goal task. Use /task --help for syntax.",
+      "Run an oracle, focus, or independently reviewed goal task. Omit arguments for guided setup.",
+    getArgumentCompletions: (prefix) =>
+      [
+        { value: "configure", description: "Open guided task setup" },
+        {
+          value: "reviewer",
+          description: "Open the live goal reviewer output",
+        },
+        {
+          value: "cancel",
+          description: "Cancel the active task and its reviewer or verifier",
+        },
+        { value: "--help", description: "Show task usage and flags" },
+      ]
+        .filter(({ value }) => value.startsWith(prefix))
+        .map((item) => ({ ...item, label: item.value })),
     handler: async (args, ctx) => {
-      if (args.trim() === "cancel") {
+      const command = args.trim();
+      if (command === "reviewer") return showReviewer(ctx, true);
+      if (command === "cancel") {
         if (!task) {
           notify(ctx, "Task: no task is running.", "warning");
           return;
@@ -372,8 +511,8 @@ export default function taskExtension(
         if (!ctx.isIdle()) ctx.abort();
         return;
       }
-      if (args.trim() === "--help" || !args.trim()) {
-        notify(ctx, USAGE, args.trim() ? "info" : "warning");
+      if (command === "--help") {
+        notify(ctx, USAGE);
         return;
       }
       if (task) {
@@ -384,85 +523,30 @@ export default function taskExtension(
         );
         return;
       }
+      if (configuration) {
+        notify(ctx, "Task: configuration is already open.", "warning");
+        return;
+      }
+      if (!command || command === "configure") {
+        if (!ctx.hasUI) return;
+        const wizard = (configuration = {});
+        let request: TaskRequest | undefined;
+        try {
+          request = await configureTask(ctx);
+          if (configuration !== wizard) return;
+        } finally {
+          if (configuration === wizard) configuration = undefined;
+        }
+        if (request) await startTask(request, ctx);
+        return;
+      }
 
       const parsed = parseTaskArgs(args);
       if (!parsed.ok) {
         notify(ctx, `Task: ${parsed.error}\n\n${USAGE}`, "warning");
         return;
       }
-
-      const active = makeTask(parsed.value);
-      task = active;
-
-      if (active.kind === "oracle") {
-        notify(
-          ctx,
-          `Task oracle: starting (verify: ${active.verify}). Use /task cancel to cancel.`,
-        );
-        setWorkingStatus(ctx, active, 1);
-        sendPrompt(ctx, active, active.prompt);
-        return;
-      }
-
-      if (active.kind === "focus") {
-        notify(
-          ctx,
-          `Task focus: starting${active.limit ? ` (limit ${active.limit} runs)` : ""}. Use /task cancel to cancel.`,
-        );
-        setWorkingStatus(ctx, active, 1);
-        sendPrompt(ctx, active, active.prompt);
-        return;
-      }
-
-      if (!ctx.model) {
-        stop(ctx, active, "Task goal: no active model is available", "error");
-        return;
-      }
-
-      notify(
-        ctx,
-        "Task goal: creating an independent verification checklist before implementation starts. Use /task cancel to cancel.",
-      );
-      setStatus(ctx, "↻ task goal planning");
-      active.display = createGoalStreamDisplay(ctx);
-      try {
-        const launchArgs =
-          options.launchArgs ??
-          inheritedArgs(
-            launchArgv,
-            launchCwd,
-            ctx.model.provider,
-            startupProvider,
-          );
-        const checker = await goalCheckerFactory({
-          cwd: ctx.cwd,
-          prompt: active.prompt,
-          model: { provider: ctx.model.provider, id: ctx.model.id },
-          thinkingLevel: ctx.thinkingLevel,
-          projectTrusted: ctx.isProjectTrusted(),
-          launchArgs,
-          onUpdate: (update) => active.display?.update(update),
-        });
-        if (task !== active) {
-          await checker.dispose();
-          return;
-        }
-        active.checker = checker;
-        await checker.initialize(active.controller.signal);
-        if (task !== active) return;
-        active.display.flush();
-        active.phase = "working";
-        setWorkingStatus(ctx, active, 1);
-        sendPrompt(ctx, active, active.prompt);
-      } catch (error) {
-        if (task === active)
-          stop(
-            ctx,
-            active,
-            `Task goal: could not initialize checker — ${error instanceof Error ? error.message : String(error)}`,
-            "error",
-          );
-      }
+      await startTask(parsed.value, ctx);
     },
   });
 }

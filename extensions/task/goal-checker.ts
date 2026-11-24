@@ -6,7 +6,6 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Invocation } from "../background-command/launch.js";
 import { hostInvocation } from "../background-command/launch.js";
 
-const CHECKER_TIMEOUT_MS = 10 * 60 * 1000;
 const STDERR_LIMIT = 16 * 1024;
 
 const CHECKER_SYSTEM_PROMPT = `You are an independent goal evaluator, not the implementing agent.
@@ -36,10 +35,15 @@ export interface GoalChecker {
   dispose(): Promise<void>;
 }
 
+export interface ReviewerModel {
+  provider: string;
+  id: string;
+}
+
 export interface GoalCheckerConfig {
   cwd: string;
   prompt: string;
-  model: { provider: string; id: string };
+  model: ReviewerModel;
   thinkingLevel?: ExtensionContext["thinkingLevel"];
   projectTrusted: boolean;
   launchArgs?: string[];
@@ -179,9 +183,7 @@ async function runChecker(
     let finalText = "";
     let streamedText = false;
     let failure: Error | undefined;
-    let timedOut = false;
     let escalation: ReturnType<typeof setTimeout> | undefined;
-    let settled = false;
 
     const terminate = () => {
       if (child.exitCode !== null || child.killed) return;
@@ -195,14 +197,7 @@ async function runChecker(
       terminate();
     };
     signal.addEventListener("abort", abort, { once: true });
-
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      failure = new Error(
-        `goal checker timed out after ${CHECKER_TIMEOUT_MS / 1000}s`,
-      );
-      terminate();
-    }, CHECKER_TIMEOUT_MS);
+    if (signal.aborted) abort();
 
     const processLine = (line: string) => {
       if (!line.trim()) return;
@@ -283,9 +278,6 @@ async function runChecker(
       failure = error;
     });
     child.once("close", (code, closeSignal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
       clearTimeout(escalation);
       signal.removeEventListener("abort", abort);
       if (buffer.trim()) processLine(buffer);
@@ -293,10 +285,6 @@ async function runChecker(
       const diagnostic = stderr ? `\nChecker stderr:\n${stderr}` : "";
       if (failure) {
         reject(new Error(`${failure.message}${diagnostic}`));
-        return;
-      }
-      if (timedOut) {
-        reject(new Error(`goal checker timed out${diagnostic}`));
         return;
       }
       if (code !== 0) {

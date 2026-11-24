@@ -5,11 +5,15 @@ Adds `/task` with three autonomous task loops: **oracle**, **focus**, and **goal
 ## Usage
 
 ```text
+/task [configure]                                    # set up and start one task
 /task --verify "<command>" <prompt>                    # oracle (default)
 /task --focus [--limit <runs>] <prompt>
 /task --goal <prompt>
+/task reviewer                                       # open the live reviewer view
 /task cancel                                         # cancel the active task
 ```
+
+`/task` with no arguments opens the same setup as `/task configure`. It asks for the task type, then the reviewer model and thinking level (goal), verification command (oracle), or optional run limit (focus). Enter the baseline prompt in a multiline editor and confirm the summary to start. Nothing runs until you confirm, and the choices apply only to that task. For goal tasks, use **Same as session** or search Pi's available models by provider or model ID. The thinking-level picker shows only levels supported by the selected model. The main session's model and thinking level don't change.
 
 The canonical type flag is `--type oracle|focus|goal`. The convenience flags `--oracle`, `--focus`, and `--goal` are equivalent. `--kind` is accepted as an alias for `--type`.
 
@@ -57,7 +61,7 @@ Before sending a continuation, focus checks current context usage. At **60% or m
 
 ## Goal
 
-Goal mode uses an independent evaluator running in a separate Pi process with the **same model and thinking level**.
+Goal mode uses an independent reviewer running in a separate Pi process. `/task --goal` uses the session's model and thinking level; `/task configure` lets you choose the reviewer's model and thinking level for that task.
 
 Before implementation starts, the evaluator:
 
@@ -65,14 +69,14 @@ Before implementation starts, the evaluator:
 2. Creates a private temporary Markdown checklist with concrete acceptance criteria.
 3. Adds a direct verification method to every checklist item.
 
-Planner and evaluator output streams into a compact bordered window above the chat editor, including text, thinking, tool calls, tool output, and checklists. The window automatically follows new output and wraps long lines instead of clipping them. Earlier output remains available throughout the task; a new checklist or evaluation does not erase it.
+Reviewer output is hidden by default. Press **Ctrl+Alt+R** or run **`/task reviewer`** in the terminal to open the live, read-only view. Press **Esc** or **Ctrl+Alt+R** to detach without interrupting the reviewer. Reopening shows the output collected while detached, including text, thinking, tool calls, tool output, and checklists.
 
-- **Alt+↑ / Alt+↓**: scroll one line.
-- **Alt+PageUp / Alt+PageDown**: scroll one page.
-- **Alt+Home**: jump to the beginning.
-- **Alt+End**: return to live auto-follow.
+- **↑ / ↓**: scroll one line.
+- **PageUp / PageDown**: scroll one page.
+- **Home**: jump to the beginning.
+- **End**: return to live auto-follow.
 
-Scrolling back pauses auto-follow so new output does not move what you are reading. Ordinary typing still goes to chat. The window is removed when the task ends; it is only mounted in interactive terminal mode. Tool output still respects Pi's own tool-level output limits.
+Scrolling back pauses auto-follow. The view closes when the task ends. Tool output still respects Pi's own tool-level output limits.
 
 Whenever the main agent settles, a fresh evaluator run reads that checklist and inspects the live workspace. It is explicitly instructed to:
 
@@ -84,7 +88,7 @@ Whenever the main agent settles, a fresh evaluator run reads that checklist and 
 
 The implementing agent does not receive or author the checklist. If the goal is incomplete, it receives the original prompt plus the evaluator's concise, evidence-based gaps. The evaluator's scratchpad is removed when the task ends.
 
-Goal evaluators inherit the host's resource and security restrictions, project-trust decision, active model, and thinking level. Each evaluator run has a 10-minute timeout.
+Goal reviewers inherit the host's resource and security restrictions and project-trust decision. The task extension imposes **no timeout** on planning or evaluation. Use `/task cancel` to stop a reviewer. Provider and individual tool limits still apply.
 
 ## Status
 
@@ -94,7 +98,7 @@ The footer's `task` slot shows the active type and phase, for example:
 - `↻ task oracle verifying (2)`
 - `↻ task focus 3/8`
 - `↻ task focus compacting (64%)`
-- `↻ task goal planning`
-- `↻ task goal checking (2)`
+- `↻ task goal planning · Ctrl+Alt+R reviewer`
+- `↻ task goal checking (2) · Ctrl+Alt+R reviewer`
 
 Only one task can be active in a session at a time.
