@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createGoalChecker, parseGoalDecision } from "./goal-checker.js";
 
 describe("parseGoalDecision", () => {
@@ -133,7 +133,7 @@ setInterval(() => {}, 1000);
     }
   });
 
-  it("streams before the child exits and does not truncate long tool calls", async () => {
+  it("streams long tool calls and lets the child run past the former timeout", async () => {
     const directory = await mkdtemp(join(tmpdir(), "goal-checker-stream-"));
     const fixture = join(directory, "checker.mjs");
     const release = join(directory, "release");
@@ -171,11 +171,13 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
     });
     const controller = new AbortController();
     let finished = false;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const initializing = checker.initialize(controller.signal).then(() => {
       finished = true;
     });
     try {
       await firstUpdate;
+      vi.advanceTimersByTime(11 * 60 * 1000);
       expect(finished).toBe(false);
       expect(updates).toContainEqual({
         phase: "planning",
@@ -190,6 +192,7 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
         text: '{"ready":true}',
       });
     } finally {
+      vi.useRealTimers();
       controller.abort();
       await initializing.catch(() => {});
       await checker.dispose();

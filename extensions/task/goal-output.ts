@@ -10,9 +10,12 @@ import {
 } from "@earendil-works/pi-tui";
 import type { GoalCheckerUpdate } from "./goal-checker.js";
 
+export const REVIEWER_SHORTCUT = "ctrl+alt+r";
+export const REVIEWER_KEY_HINT = "Ctrl+Alt+R";
+
 export interface GoalStreamDisplay {
   update(update: GoalCheckerUpdate): void;
-  flush(): void;
+  toggle(): Promise<void>;
   clear(): void;
 }
 
@@ -22,24 +25,12 @@ interface OutputPart {
   lines?: string[];
 }
 
-/** A bounded viewport, not a bounded log: scrolling never discards old output. */
-export class GoalOutputPane implements Component {
-  private phase: GoalCheckerUpdate["phase"] = "planning";
+/** The task retains the log even when there is no attached view. */
+export class GoalOutputLog {
+  phase: GoalCheckerUpdate["phase"] = "planning";
   private parts: OutputPart[] = [];
   private toolOutputs = new Map<string, OutputPart>();
   private width?: number;
-  private scroll = new ScrollView(
-    {
-      render: (width) => this.renderOutput(width),
-      invalidate: () => this.invalidate(),
-    },
-    { follow: "end" },
-  );
-
-  constructor(
-    private tui: TUI,
-    private theme: Theme,
-  ) {}
 
   update(update: GoalCheckerUpdate): void {
     this.phase = update.phase;
@@ -79,25 +70,11 @@ export class GoalOutputPane implements Component {
     }
   }
 
-  handleInput(data: string): boolean {
-    if (matchesKey(data, "alt+up")) this.scroll.scrollBy(-1);
-    else if (matchesKey(data, "alt+down")) this.scroll.scrollBy(1);
-    else if (matchesKey(data, "alt+pageUp"))
-      this.scroll.scrollBy(-this.scroll.viewportHeight);
-    else if (matchesKey(data, "alt+pageDown"))
-      this.scroll.scrollBy(this.scroll.viewportHeight);
-    else if (matchesKey(data, "alt+home")) this.scroll.scrollToStart();
-    else if (matchesKey(data, "alt+end")) this.scroll.scrollToEnd();
-    else return false;
-    this.tui.requestRender();
-    return true;
-  }
-
   invalidate(): void {
     for (const part of this.parts) part.lines = undefined;
   }
 
-  private renderOutput(width: number): string[] {
+  render(width: number, theme: Theme): string[] {
     if (this.width !== width) {
       this.width = width;
       this.invalidate();
@@ -111,11 +88,51 @@ export class GoalOutputPane implements Component {
               ? "accent"
               : "toolOutput";
         part.lines = wrapTextWithAnsi(part.text, width).map((line) =>
-          this.theme.fg(color, line),
+          theme.fg(color, line),
         );
       }
       return part.lines;
     });
+  }
+}
+
+export class GoalOutputPane implements Component {
+  private scroll = new ScrollView(
+    {
+      render: (width) => this.log.render(width, this.theme),
+      invalidate: () => this.invalidate(),
+    },
+    { follow: "end" },
+  );
+
+  constructor(
+    private tui: TUI,
+    private theme: Theme,
+    private log: GoalOutputLog,
+    private detach: () => void,
+  ) {
+    this.invalidate();
+  }
+
+  handleInput(data: string): void {
+    if (matchesKey(data, "escape") || matchesKey(data, REVIEWER_SHORTCUT)) {
+      this.detach();
+      return;
+    }
+    if (matchesKey(data, "up")) this.scroll.scrollBy(-1);
+    else if (matchesKey(data, "down")) this.scroll.scrollBy(1);
+    else if (matchesKey(data, "pageUp"))
+      this.scroll.scrollBy(-this.scroll.viewportHeight);
+    else if (matchesKey(data, "pageDown"))
+      this.scroll.scrollBy(this.scroll.viewportHeight);
+    else if (matchesKey(data, "home")) this.scroll.scrollToStart();
+    else if (matchesKey(data, "end")) this.scroll.scrollToEnd();
+    else return;
+    this.tui.requestRender();
+  }
+
+  invalidate(): void {
+    this.log.invalidate();
   }
 
   render(width: number): string[] {
@@ -124,20 +141,18 @@ export class GoalOutputPane implements Component {
     const lines = this.scroll.render(innerWidth);
     const height = Math.max(
       1,
-      Math.min(10, Math.floor(this.tui.terminal.rows / 3)),
+      Math.min(24, Math.floor(this.tui.terminal.rows * 0.7) - 3),
     );
-    // Explicit clipping also works in regular mode, where terminal scrollback
-    // owns the outer viewport rather than the fullscreen layout engine.
     this.scroll.updateLayout(lines.length, height, () =>
       this.tui.requestRender(),
     );
     const start = this.scroll.scrollTop;
     const visible = lines.slice(start, start + height);
-    const title = `${this.phase === "planning" ? "Goal planner" : "Goal evaluator"} (${this.scroll.isFollowingEnd ? "live" : "paused"})`;
+    const title = ` ${this.log.phase === "planning" ? "Goal planner" : "Goal evaluator"} (${this.scroll.isFollowingEnd ? "following" : "paused"}) `;
     const border = (text: string) => this.theme.fg("border", text);
     const row = (text: string) =>
       border("│") + truncateToWidth(text, innerWidth, "", true) + border("│");
-    const heading = truncateToWidth(` ${title} `, innerWidth, "");
+    const heading = truncateToWidth(title, innerWidth, "");
     return [
       border("╭") +
         this.theme.fg("accent", heading) +
@@ -147,7 +162,7 @@ export class GoalOutputPane implements Component {
       row(
         this.theme.fg(
           "dim",
-          `${lines.length ? start + 1 : 0}–${Math.min(start + height, lines.length)}/${lines.length} · Alt+↑/↓ scroll · Alt+Home start · Alt+End live`,
+          `Esc detach · ↑/↓ PgUp/PgDn scroll · Home/End · ${lines.length ? start + 1 : 0}–${Math.min(start + height, lines.length)}/${lines.length}`,
         ),
       ),
       border(`╰${"─".repeat(innerWidth)}╯`),
@@ -159,44 +174,50 @@ export function createGoalStreamDisplay(
   ctx: ExtensionContext,
 ): GoalStreamDisplay {
   if (!ctx.hasUI || ctx.mode !== "tui")
-    return { update() {}, flush() {}, clear() {} };
+    return { update() {}, async toggle() {}, clear() {} };
 
-  const key = "task-goal-stream";
-  let pane: GoalOutputPane;
-  let requestRender: () => void = () => {};
+  const log = new GoalOutputLog();
+  let detach: (() => void) | undefined;
+  let requestRender: (() => void) | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let cleared = false;
-  ctx.ui.setWidget(key, (tui, theme) => {
-    pane = new GoalOutputPane(tui, theme);
-    requestRender = () => tui.requestRender();
-    return pane;
-  });
-  const unsubscribe = ctx.ui.onTerminalInput((data) => {
-    if (!cleared && pane.handleInput(data)) return { consume: true };
-    return undefined;
-  });
   const flush = () => {
-    clearTimeout(timer);
     timer = undefined;
-    if (!cleared) requestRender();
+    requestRender?.();
   };
   return {
     update(update) {
       if (cleared) return;
-      pane.update(update);
-      if (!timer) {
-        timer = setTimeout(flush, 40);
-        timer.unref?.();
+      log.update(update);
+      if (requestRender && !timer) timer = setTimeout(flush, 40).unref();
+    },
+    async toggle() {
+      if (cleared) return;
+      if (detach) return detach();
+      try {
+        await ctx.ui.custom<void>(
+          (tui, theme, _keys, done) => {
+            detach = () => {
+              clearTimeout(timer);
+              timer = undefined;
+              requestRender = undefined;
+              done();
+            };
+            requestRender = () => tui.requestRender();
+            return new GoalOutputPane(tui, theme, log, detach);
+          },
+          { overlay: true, overlayOptions: { width: "85%" } },
+        );
+      } finally {
+        detach = undefined;
+        requestRender = undefined;
+        clearTimeout(timer);
+        timer = undefined;
       }
     },
-    flush,
     clear() {
-      if (cleared) return;
       cleared = true;
-      clearTimeout(timer);
-      timer = undefined;
-      unsubscribe();
-      ctx.ui.setWidget(key, undefined);
+      detach?.();
     },
   };
 }
